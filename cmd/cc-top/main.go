@@ -4,6 +4,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -102,6 +104,9 @@ func main() {
 
 	// Start the alert engine.
 	alertEngine.Start(ctx)
+
+	// Silence the default logger so it doesn't pollute the TUI.
+	log.SetOutput(io.Discard)
 
 	// Create the TUI model with all providers wired up.
 	model := tui.NewModel(cfg,

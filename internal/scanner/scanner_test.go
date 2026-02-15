@@ -393,7 +393,9 @@ func TestIsClaude(t *testing.T) {
 		args       []string
 		want       bool
 	}{
-		{"claude binary", "claude", nil, true},
+		{"claude CLI", "claude", []string{"claude", "--resume", "abc123"}, true},
+		{"claude CLI no args", "claude", nil, true},
+		{"Claude Desktop app", "Claude", []string{"/Applications/Claude.app/Contents/MacOS/Claude"}, false},
 		{"claude-helper", "claude-helper", nil, false},
 		{"node with claude-code", "node", []string{"node", "/path/@anthropic-ai/claude-code/cli.js"}, true},
 		{"node without claude-code", "node", []string{"node", "/path/server.js"}, false},

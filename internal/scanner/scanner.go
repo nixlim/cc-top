@@ -201,14 +201,19 @@ func (s *Scanner) listAllLocked() []ProcessInfo {
 	return result
 }
 
-// isClaude returns true if the process is a Claude Code instance.
-// Detection: process name is "claude" (but not "claude-helper" or similar),
+// isClaude returns true if the process is a Claude Code CLI instance.
+// Detection: process name is "claude" (rejecting Claude Desktop .app and helpers),
 // or it's a node process with "@anthropic-ai/claude-code" in argv.
 func isClaude(binaryName string, args []string) bool {
 	name := strings.ToLower(binaryName)
 
-	// Direct "claude" binary match. Reject false positives like "claude-helper".
+	// Direct "claude" binary match.
 	if name == "claude" {
+		// Reject Claude Desktop app and Electron helpers: their argv[0]
+		// contains ".app/" (e.g. /Applications/Claude.app/Contents/MacOS/Claude).
+		if len(args) > 0 && strings.Contains(args[0], ".app/") {
+			return false
+		}
 		return true
 	}
 

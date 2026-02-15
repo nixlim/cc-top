@@ -167,6 +167,11 @@ func (s *Scanner) Stop() {
 	<-s.done
 }
 
+// API returns the underlying ProcessAPI, used by the correlator for port mapping.
+func (s *Scanner) API() ProcessAPI {
+	return s.api
+}
+
 // GetProcesses returns all currently tracked processes (alive + exited).
 func (s *Scanner) GetProcesses() []ProcessInfo {
 	s.mu.RLock()

@@ -1,6 +1,6 @@
 # cc-top
 
-<video src="start_up_vid.mp4" autoplay loop muted playsinline></video>
+![cc-top demo](start_up_vid.gif)
 
 A terminal dashboard for monitoring [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions in real time. Think `htop`, but for your AI coding assistant.
 

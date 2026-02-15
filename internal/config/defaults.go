@@ -34,6 +34,8 @@ func DefaultConfig() Config {
 		Models: defaultModelContextLimits(),
 		Pricing: map[string][4]float64{
 			"claude-sonnet-4-5-20250929": {3.00, 15.00, 0.30, 3.75},
+			"claude-opus-4-6":            {5.00, 25.00, 0.50, 6.25},
+			"claude-haiku-4-5-20251001":  {1.00, 5.00, 0.10, 1.25},
 		},
 	}
 }

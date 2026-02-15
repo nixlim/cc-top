@@ -1,0 +1,40 @@
+# cc-top configuration
+# All values shown are the defaults.
+
+[receiver]
+grpc_port = 4317
+http_port = 4318
+bind = "127.0.0.1"
+
+[scanner]
+interval_seconds = 5
+
+[alerts]
+cost_surge_threshold_per_hour = 100.00
+runaway_token_velocity = 500000
+runaway_token_sustained_minutes = 2
+loop_detector_threshold = 3
+loop_detector_window_minutes = 5
+error_storm_count = 10
+stale_session_hours = 2
+context_pressure_percent = 80
+
+[alerts.notifications]
+system_notify = true
+
+[display]
+event_buffer_size = 1000
+refresh_rate_ms = 500
+cost_color_green_below = 0.50
+cost_color_yellow_below = 2.00
+
+[models]
+claude-sonnet-4-5-20250929 = 200000
+claude-opus-4-6 = 200000
+claude-haiku-4-5-20251001 = 200000
+
+[models.pricing]
+# [input, output, cache_read, cache_creation] per million tokens
+claude-sonnet-4-5-20250929 = [3.00, 15.00, 0.30, 3.75]
+claude-opus-4-6 = [5.00, 25.00, 0.50, 6.25]
+claude-haiku-4-5-20251001 = [1.00, 5.00, 0.10, 1.25]

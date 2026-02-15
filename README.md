@@ -99,34 +99,14 @@ When the kill switch is activated, the target session is paused and a confirmati
 
 Configuration is optional. cc-top works out of the box with sensible defaults.
 
-To customize, create `~/.config/cc-top/config.toml`:
+The config file location is `~/.config/cc-top/config.toml`. To get started, copy the example config:
 
-```toml
-[receiver]
-grpc_port = 4317
-http_port = 4318
-bind = "127.0.0.1"
-
-[scanner]
-interval_seconds = 5
-
-[alerts]
-cost_surge_threshold_per_hour = 2.00
-runaway_token_velocity = 50000
-loop_detector_threshold = 3
-error_storm_count = 10
-stale_session_hours = 2
-context_pressure_percent = 80
-
-[alerts.notifications]
-system_notify = true
-
-[display]
-event_buffer_size = 1000
-refresh_rate_ms = 500
-cost_color_green_below = 0.50
-cost_color_yellow_below = 2.00
+```bash
+mkdir -p ~/.config/cc-top
+cp config.toml.example ~/.config/cc-top/config.toml
 ```
+
+Then edit `~/.config/cc-top/config.toml` to taste. See [`config.toml.example`](config.toml.example) for all available options and their defaults.
 
 ## Architecture
 
@@ -151,14 +131,15 @@ Claude Code instances
 ## Development
 
 ```bash
+# Build and run in one step
+./run.sh
+
+# Or manually:
+go build -o cc-top ./cmd/cc-top/
+./cc-top
+
 # Run tests
 go test -race ./...
-
-# Build
-go build -o cc-top ./cmd/cc-top/
-
-# Run
-./cc-top
 ```
 
 ## AI co-authorship

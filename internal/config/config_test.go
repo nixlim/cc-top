@@ -51,6 +51,15 @@ func TestConfigParser_Defaults(t *testing.T) {
 	if cfg.Alerts.ContextPressurePercent != 80 {
 		t.Errorf("default context_pressure_percent: want 80, got %d", cfg.Alerts.ContextPressurePercent)
 	}
+	if cfg.Alerts.SessionCostThreshold != 5.00 {
+		t.Errorf("default session_cost_threshold: want 5.00, got %f", cfg.Alerts.SessionCostThreshold)
+	}
+	if cfg.Alerts.HighRejectionPercent != 50 {
+		t.Errorf("default high_rejection_percent: want 50, got %d", cfg.Alerts.HighRejectionPercent)
+	}
+	if cfg.Alerts.HighRejectionWindowMinutes != 5 {
+		t.Errorf("default high_rejection_window_minutes: want 5, got %d", cfg.Alerts.HighRejectionWindowMinutes)
+	}
 	if !cfg.Alerts.Notifications.SystemNotify {
 		t.Error("default system_notify: want true, got false")
 	}
@@ -343,5 +352,103 @@ func TestConfigParser_EmptyString(t *testing.T) {
 	// All defaults should be returned.
 	if result.Config.Receiver.GRPCPort != 4317 {
 		t.Errorf("grpc_port: want 4317, got %d", result.Config.Receiver.GRPCPort)
+	}
+}
+
+func TestConfigParser_SessionCostThresholdDefault(t *testing.T) {
+	result, err := LoadFromString("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Config.Alerts.SessionCostThreshold != 5.00 {
+		t.Errorf("default session_cost_threshold: want 5.00, got %f", result.Config.Alerts.SessionCostThreshold)
+	}
+}
+
+func TestConfigParser_SessionCostThresholdCustom(t *testing.T) {
+	tomlData := `
+[alerts]
+session_cost_threshold = 10.00
+`
+	result, err := LoadFromString(tomlData)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Config.Alerts.SessionCostThreshold != 10.00 {
+		t.Errorf("session_cost_threshold: want 10.00, got %f", result.Config.Alerts.SessionCostThreshold)
+	}
+}
+
+func TestConfigParser_SessionCostThresholdInvalid(t *testing.T) {
+	tomlData := `
+[alerts]
+session_cost_threshold = -1.0
+`
+	_, err := LoadFromString(tomlData)
+	if err == nil {
+		t.Error("expected validation error for negative session_cost_threshold")
+	}
+}
+
+func TestConfigParser_HighRejectionDefaults(t *testing.T) {
+	result, err := LoadFromString("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Config.Alerts.HighRejectionPercent != 50 {
+		t.Errorf("default high_rejection_percent: want 50, got %d", result.Config.Alerts.HighRejectionPercent)
+	}
+	if result.Config.Alerts.HighRejectionWindowMinutes != 5 {
+		t.Errorf("default high_rejection_window_minutes: want 5, got %d", result.Config.Alerts.HighRejectionWindowMinutes)
+	}
+}
+
+func TestConfigParser_HighRejectionCustom(t *testing.T) {
+	tomlData := `
+[alerts]
+high_rejection_percent = 75
+high_rejection_window_minutes = 10
+`
+	result, err := LoadFromString(tomlData)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Config.Alerts.HighRejectionPercent != 75 {
+		t.Errorf("high_rejection_percent: want 75, got %d", result.Config.Alerts.HighRejectionPercent)
+	}
+	if result.Config.Alerts.HighRejectionWindowMinutes != 10 {
+		t.Errorf("high_rejection_window_minutes: want 10, got %d", result.Config.Alerts.HighRejectionWindowMinutes)
+	}
+}
+
+func TestConfigParser_HighRejectionInvalid(t *testing.T) {
+	tests := []struct {
+		name string
+		toml string
+	}{
+		{
+			name: "high_rejection_percent zero",
+			toml: `[alerts]
+high_rejection_percent = 0`,
+		},
+		{
+			name: "high_rejection_percent over 100",
+			toml: `[alerts]
+high_rejection_percent = 101`,
+		},
+		{
+			name: "high_rejection_window_minutes zero",
+			toml: `[alerts]
+high_rejection_window_minutes = 0`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := LoadFromString(tt.toml)
+			if err == nil {
+				t.Error("expected validation error, got nil")
+			}
+		})
 	}
 }

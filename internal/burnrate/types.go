@@ -2,12 +2,22 @@ package burnrate
 
 import "time"
 
+// ModelBurnRate holds cost data for a single model.
+type ModelBurnRate struct {
+	Model      string
+	HourlyRate float64
+	TotalCost  float64
+}
+
 // BurnRate holds computed cost/token rate data for display.
 type BurnRate struct {
-	TotalCost     float64
-	HourlyRate    float64
-	Trend         TrendDirection
-	TokenVelocity float64 // tokens per minute
+	TotalCost         float64
+	HourlyRate        float64
+	Trend             TrendDirection
+	TokenVelocity     float64 // tokens per minute
+	PerModel          []ModelBurnRate
+	DailyProjection   float64 // HourlyRate * 24
+	MonthlyProjection float64 // HourlyRate * 720
 }
 
 // TrendDirection indicates rate change direction.

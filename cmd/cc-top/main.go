@@ -80,7 +80,7 @@ func main() {
 	alertEngine := alerts.NewEngine(store, cfg, brCalc, alerts.WithNotifier(notifier))
 
 	// Create the stats calculator.
-	statsCalc := stats.NewCalculator()
+	statsCalc := stats.NewCalculator(cfg.Pricing)
 
 	// Create the shutdown manager.
 	shutdownMgr := tui.NewShutdownManager()

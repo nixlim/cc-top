@@ -191,6 +191,110 @@ func TestEventFormat_ToolDecision(t *testing.T) {
 	})
 }
 
+func TestEventFormat_ToolResult_MCP(t *testing.T) {
+	e := state.Event{
+		Name: "claude_code.tool_result",
+		Attributes: map[string]string{
+			"tool_name":       "mcp_tool",
+			"success":         "true",
+			"duration_ms":     "500",
+			"tool_parameters": `{"mcp_server_name":"github","mcp_tool_name":"create_issue","other":"val"}`,
+		},
+		Timestamp: time.Now(),
+	}
+
+	fe := FormatEvent("session", e)
+
+	expected := "[session] github:create_issue \u2713 (0.5s)"
+	if fe.Formatted != expected {
+		t.Errorf("expected %q, got %q", expected, fe.Formatted)
+	}
+}
+
+func TestEventFormat_ToolResult_MCP_NoServer(t *testing.T) {
+	e := state.Event{
+		Name: "claude_code.tool_result",
+		Attributes: map[string]string{
+			"tool_name":       "Bash",
+			"success":         "true",
+			"duration_ms":     "100",
+			"tool_parameters": `{"command":"ls -la"}`,
+		},
+		Timestamp: time.Now(),
+	}
+
+	fe := FormatEvent("session", e)
+
+	// Should NOT change tool_name since no MCP fields.
+	expected := "[session] Bash \u2713 (0.1s)"
+	if fe.Formatted != expected {
+		t.Errorf("expected %q, got %q", expected, fe.Formatted)
+	}
+}
+
+func TestEventFormat_ToolResult_MCP_InvalidJSON(t *testing.T) {
+	e := state.Event{
+		Name: "claude_code.tool_result",
+		Attributes: map[string]string{
+			"tool_name":       "Bash",
+			"success":         "true",
+			"duration_ms":     "100",
+			"tool_parameters": `not valid json`,
+		},
+		Timestamp: time.Now(),
+	}
+
+	fe := FormatEvent("session", e)
+
+	// Should fall back to original tool_name.
+	expected := "[session] Bash \u2713 (0.1s)"
+	if fe.Formatted != expected {
+		t.Errorf("expected %q, got %q", expected, fe.Formatted)
+	}
+}
+
+func TestEventFormat_RawAttributes(t *testing.T) {
+	original := map[string]string{
+		"tool_name":   "Bash",
+		"success":     "true",
+		"duration_ms": "100",
+	}
+	e := state.Event{
+		Name:       "claude_code.tool_result",
+		Attributes: original,
+		Timestamp:  time.Now(),
+	}
+
+	fe := FormatEvent("session", e)
+
+	// Verify deep copy.
+	if fe.RawAttributes == nil {
+		t.Fatal("RawAttributes should not be nil")
+	}
+	if fe.RawAttributes["tool_name"] != "Bash" {
+		t.Errorf("expected tool_name=Bash, got %s", fe.RawAttributes["tool_name"])
+	}
+
+	// Modify RawAttributes and verify original is unchanged.
+	fe.RawAttributes["tool_name"] = "Modified"
+	if original["tool_name"] != "Bash" {
+		t.Error("modifying RawAttributes should not affect original event")
+	}
+}
+
+func TestEventFormat_RawAttributes_Empty(t *testing.T) {
+	e := state.Event{
+		Name:      "claude_code.user_prompt",
+		Timestamp: time.Now(),
+	}
+
+	fe := FormatEvent("session", e)
+
+	if fe.RawAttributes != nil {
+		t.Error("RawAttributes should be nil for events with no attributes")
+	}
+}
+
 func TestFormatTokenCount(t *testing.T) {
 	tests := []struct {
 		input    string

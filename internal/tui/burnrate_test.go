@@ -143,16 +143,165 @@ func TestRenderBurnRatePanel_NilProvider(t *testing.T) {
 	}
 }
 
-func TestRenderBigNumber(t *testing.T) {
-	// Just verify it doesn't panic and produces output.
-	result := renderBigNumber("$1.23", costGreenStyle)
-	if result == "" {
-		t.Error("renderBigNumber returned empty string")
+func TestRenderCostDisplay(t *testing.T) {
+	tests := []struct {
+		name       string
+		cost       string
+		availH     int
+		availW     int
+		wantRows   int
+		wantDollar bool
+	}{
+		{"large_font", "42.50", 10, 80, 5, true},
+		{"medium_font", "42.50", 3, 80, 3, true},
+		{"plain_fallback_short", "42.50", 2, 80, 1, true},
+		{"plain_fallback_narrow", "42.50", 10, 10, 1, true},
+		{"large_with_big_number", "1234.56", 10, 80, 5, true},
 	}
-	// Should have 5 rows.
-	lines := strings.Split(result, "\n")
-	if len(lines) != 5 {
-		t.Errorf("renderBigNumber produced %d lines, want 5", len(lines))
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := renderCostDisplay(tt.cost, tt.availH, tt.availW, costGreenStyle)
+			if result == "" {
+				t.Error("renderCostDisplay returned empty string")
+			}
+			lines := strings.Split(result, "\n")
+			if len(lines) != tt.wantRows {
+				t.Errorf("got %d rows, want %d", len(lines), tt.wantRows)
+			}
+			// All sizes should contain a "$" somewhere.
+			if tt.wantDollar && !strings.Contains(stripAnsi(result), "$") {
+				t.Errorf("result should contain $, got %q", result)
+			}
+		})
+	}
+}
+
+func TestRenderCostDisplay_DynamicScaling(t *testing.T) {
+	// Verify that increasing available height produces more rows (larger font).
+	small := renderCostDisplay("1.23", 2, 80, costGreenStyle)
+	medium := renderCostDisplay("1.23", 3, 80, costGreenStyle)
+	large := renderCostDisplay("1.23", 5, 80, costGreenStyle)
+
+	smallRows := len(strings.Split(small, "\n"))
+	medRows := len(strings.Split(medium, "\n"))
+	largeRows := len(strings.Split(large, "\n"))
+
+	if smallRows >= medRows {
+		t.Errorf("small (%d rows) should be shorter than medium (%d rows)", smallRows, medRows)
+	}
+	if medRows >= largeRows {
+		t.Errorf("medium (%d rows) should be shorter than large (%d rows)", medRows, largeRows)
+	}
+}
+
+func TestShortModel(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"claude-opus-4-6", "opus-4-6"},
+		{"claude-sonnet-4-5-20250929", "sonnet-4-5"},
+		{"claude-haiku-4-5-20251001", "haiku-4-5"},
+		{"unknown", "unknown"},
+		{"", ""},
+		{"claude-", "claude-"},
+		{"custom-model", "custom-model"},
+	}
+
+	for _, tt := range tests {
+		got := shortModel(tt.input)
+		if got != tt.want {
+			t.Errorf("shortModel(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestRenderBurnRatePanel_WithProjections(t *testing.T) {
+	cfg := config.DefaultConfig()
+	mockBR := &mockBurnRateProvider{
+		global: burnrate.BurnRate{
+			TotalCost:         10.00,
+			HourlyRate:        1.00,
+			Trend:             burnrate.TrendFlat,
+			TokenVelocity:     5000,
+			DailyProjection:   24.00,
+			MonthlyProjection: 720.00,
+		},
+	}
+
+	m := NewModel(cfg, WithBurnRateProvider(mockBR))
+	m.width = 120
+	m.height = 40
+	m.cachedBurnRate = m.computeBurnRate()
+
+	panel := m.renderBurnRatePanel(60, 14)
+	stripped := stripAnsi(panel)
+
+	if !strings.Contains(stripped, "Day $24.00") {
+		t.Error("panel should contain daily projection")
+	}
+	if !strings.Contains(stripped, "Mon $720.00") {
+		t.Error("panel should contain monthly projection")
+	}
+}
+
+func TestRenderBurnRatePanel_WithPerModel(t *testing.T) {
+	cfg := config.DefaultConfig()
+	mockBR := &mockBurnRateProvider{
+		global: burnrate.BurnRate{
+			TotalCost:     20.00,
+			HourlyRate:    4.00,
+			Trend:         burnrate.TrendUp,
+			TokenVelocity: 10000,
+			PerModel: []burnrate.ModelBurnRate{
+				{Model: "claude-opus-4-6", HourlyRate: 3.00, TotalCost: 15.00},
+				{Model: "claude-sonnet-4-5-20250929", HourlyRate: 1.00, TotalCost: 5.00},
+			},
+			DailyProjection:   96.00,
+			MonthlyProjection: 2880.00,
+		},
+	}
+
+	m := NewModel(cfg, WithBurnRateProvider(mockBR))
+	m.width = 120
+	m.height = 40
+	m.cachedBurnRate = m.computeBurnRate()
+
+	panel := m.renderBurnRatePanel(60, 16)
+	stripped := stripAnsi(panel)
+
+	if !strings.Contains(stripped, "opus-4-6") {
+		t.Error("panel should contain shortened opus model name")
+	}
+	if !strings.Contains(stripped, "sonnet-4-5") {
+		t.Error("panel should contain shortened sonnet model name")
+	}
+}
+
+func TestRenderBurnRatePanel_SingleModelNoBreakdown(t *testing.T) {
+	cfg := config.DefaultConfig()
+	mockBR := &mockBurnRateProvider{
+		global: burnrate.BurnRate{
+			TotalCost:  5.00,
+			HourlyRate: 1.00,
+			PerModel: []burnrate.ModelBurnRate{
+				{Model: "claude-opus-4-6", HourlyRate: 1.00, TotalCost: 5.00},
+			},
+		},
+	}
+
+	m := NewModel(cfg, WithBurnRateProvider(mockBR))
+	m.width = 120
+	m.height = 40
+	m.cachedBurnRate = m.computeBurnRate()
+
+	panel := m.renderBurnRatePanel(60, 14)
+	stripped := stripAnsi(panel)
+
+	// Single model should NOT show per-model breakdown.
+	if strings.Contains(stripped, "opus-4-6") {
+		t.Error("single model should not show per-model breakdown")
 	}
 }
 

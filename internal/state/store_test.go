@@ -246,6 +246,70 @@ func TestStateStore_MarkExited(t *testing.T) {
 	}
 }
 
+func TestStateStore_SessionCountSetsStartedAt(t *testing.T) {
+	store := NewMemoryStore()
+
+	metricTime := time.Date(2025, 6, 15, 10, 30, 0, 0, time.UTC)
+
+	store.AddMetric("sess-ts", Metric{
+		Name:      "claude_code.session.count",
+		Value:     1,
+		Timestamp: metricTime,
+	})
+
+	s := store.GetSession("sess-ts")
+	if s == nil {
+		t.Fatal("expected session to exist")
+	}
+	// StartedAt should be the metric timestamp, not time.Now().
+	if !s.StartedAt.Equal(metricTime) {
+		t.Errorf("expected StartedAt=%v, got %v", metricTime, s.StartedAt)
+	}
+}
+
+func TestStateStore_SessionCountDoesNotOverwriteStartedAt(t *testing.T) {
+	store := NewMemoryStore()
+
+	firstTime := time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
+	laterTime := time.Date(2025, 6, 15, 11, 0, 0, 0, time.UTC)
+
+	// First session.count creates the session.
+	store.AddMetric("sess-ts2", Metric{
+		Name:      "claude_code.session.count",
+		Value:     1,
+		Timestamp: firstTime,
+	})
+
+	// Second session.count should not overwrite StartedAt.
+	store.AddMetric("sess-ts2", Metric{
+		Name:      "claude_code.session.count",
+		Value:     2,
+		Timestamp: laterTime,
+	})
+
+	s := store.GetSession("sess-ts2")
+	if !s.StartedAt.Equal(firstTime) {
+		t.Errorf("expected StartedAt=%v (first metric), got %v", firstTime, s.StartedAt)
+	}
+}
+
+func TestStateStore_SessionCountZeroTimestamp(t *testing.T) {
+	store := NewMemoryStore()
+
+	before := time.Now()
+	store.AddMetric("sess-zero-ts", Metric{
+		Name:  "claude_code.session.count",
+		Value: 1,
+		// Zero timestamp — should fallback to time.Now().
+	})
+	after := time.Now()
+
+	s := store.GetSession("sess-zero-ts")
+	if s.StartedAt.Before(before) || s.StartedAt.After(after) {
+		t.Errorf("expected StartedAt near now, got %v (before=%v, after=%v)", s.StartedAt, before, after)
+	}
+}
+
 func TestStateStore_MarkExited_IgnoresZeroPID(t *testing.T) {
 	store := NewMemoryStore()
 
@@ -386,6 +450,348 @@ func TestStateStore_GetSessionReturnsCopy(t *testing.T) {
 	}
 	if len(original.Metrics) != 1 {
 		t.Error("mutation of copy's metrics slice should not affect store")
+	}
+}
+
+func TestStateStore_OrgAndUserFromEvent(t *testing.T) {
+	store := NewMemoryStore()
+
+	store.AddEvent("sess-id", Event{
+		Name: "claude_code.api_request",
+		Attributes: map[string]string{
+			"organization.id":    "org-123",
+			"user.account_uuid":  "user-abc",
+		},
+		Timestamp: time.Now(),
+	})
+
+	s := store.GetSession("sess-id")
+	if s.OrgID != "org-123" {
+		t.Errorf("expected OrgID='org-123', got %q", s.OrgID)
+	}
+	if s.UserUUID != "user-abc" {
+		t.Errorf("expected UserUUID='user-abc', got %q", s.UserUUID)
+	}
+}
+
+func TestStateStore_OrgAndUserFromMetric(t *testing.T) {
+	store := NewMemoryStore()
+
+	store.AddMetric("sess-id2", Metric{
+		Name:  "claude_code.token.usage",
+		Value: 100,
+		Attributes: map[string]string{
+			"organization.id":    "org-456",
+			"user.account_uuid":  "user-def",
+		},
+		Timestamp: time.Now(),
+	})
+
+	s := store.GetSession("sess-id2")
+	if s.OrgID != "org-456" {
+		t.Errorf("expected OrgID='org-456', got %q", s.OrgID)
+	}
+	if s.UserUUID != "user-def" {
+		t.Errorf("expected UserUUID='user-def', got %q", s.UserUUID)
+	}
+}
+
+func TestStateStore_OrgAndUserAbsent(t *testing.T) {
+	store := NewMemoryStore()
+
+	store.AddEvent("sess-no-id", Event{
+		Name:       "claude_code.api_request",
+		Attributes: map[string]string{"model": "sonnet-4.5"},
+		Timestamp:  time.Now(),
+	})
+
+	s := store.GetSession("sess-no-id")
+	if s.OrgID != "" {
+		t.Errorf("expected OrgID='', got %q", s.OrgID)
+	}
+	if s.UserUUID != "" {
+		t.Errorf("expected UserUUID='', got %q", s.UserUUID)
+	}
+}
+
+func TestStateStore_OrgAndUserEmptyIgnored(t *testing.T) {
+	store := NewMemoryStore()
+
+	// Set initial values.
+	store.AddEvent("sess-empty", Event{
+		Name: "claude_code.api_request",
+		Attributes: map[string]string{
+			"organization.id":   "org-real",
+			"user.account_uuid": "user-real",
+		},
+		Timestamp: time.Now(),
+	})
+
+	// Empty values should not overwrite.
+	store.AddEvent("sess-empty", Event{
+		Name: "claude_code.api_request",
+		Attributes: map[string]string{
+			"organization.id":   "",
+			"user.account_uuid": "",
+		},
+		Timestamp: time.Now(),
+	})
+
+	s := store.GetSession("sess-empty")
+	if s.OrgID != "org-real" {
+		t.Errorf("expected OrgID='org-real' (not overwritten by empty), got %q", s.OrgID)
+	}
+	if s.UserUUID != "user-real" {
+		t.Errorf("expected UserUUID='user-real' (not overwritten by empty), got %q", s.UserUUID)
+	}
+}
+
+func TestStateStore_FastModeFromEvent(t *testing.T) {
+	store := NewMemoryStore()
+
+	// Event with speed attribute sets FastMode=true.
+	store.AddEvent("sess-fast", Event{
+		Name:       "claude_code.api_request",
+		Attributes: map[string]string{"speed": "fast"},
+		Timestamp:  time.Now(),
+	})
+
+	s := store.GetSession("sess-fast")
+	if !s.FastMode {
+		t.Error("expected FastMode=true when speed attribute present")
+	}
+
+	// Event without speed attribute sets FastMode=false.
+	store.AddEvent("sess-fast", Event{
+		Name:       "claude_code.api_request",
+		Attributes: map[string]string{"model": "sonnet-4.5"},
+		Timestamp:  time.Now(),
+	})
+
+	s = store.GetSession("sess-fast")
+	if s.FastMode {
+		t.Error("expected FastMode=false when speed attribute absent")
+	}
+}
+
+func TestStateStore_FastModeFromMetric(t *testing.T) {
+	store := NewMemoryStore()
+
+	store.AddMetric("sess-fast-m", Metric{
+		Name:       "claude_code.token.usage",
+		Value:      100,
+		Attributes: map[string]string{"speed": "fast"},
+		Timestamp:  time.Now(),
+	})
+
+	s := store.GetSession("sess-fast-m")
+	if !s.FastMode {
+		t.Error("expected FastMode=true from metric with speed attribute")
+	}
+}
+
+func TestStateStore_FastModeEmptySpeed(t *testing.T) {
+	store := NewMemoryStore()
+
+	// Empty speed attribute should NOT set FastMode.
+	store.AddEvent("sess-empty-speed", Event{
+		Name:       "claude_code.api_request",
+		Attributes: map[string]string{"speed": ""},
+		Timestamp:  time.Now(),
+	})
+
+	s := store.GetSession("sess-empty-speed")
+	if s.FastMode {
+		t.Error("expected FastMode=false for empty speed attribute")
+	}
+}
+
+func TestStateStore_EventSequenceOrdering(t *testing.T) {
+	store := NewMemoryStore()
+	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// Add events out of sequence order.
+	store.AddEvent("sess-seq", Event{
+		Name:       "claude_code.api_request",
+		Attributes: map[string]string{"event.sequence": "3"},
+		Timestamp:  base.Add(1 * time.Second),
+	})
+	store.AddEvent("sess-seq", Event{
+		Name:       "claude_code.api_request",
+		Attributes: map[string]string{"event.sequence": "1"},
+		Timestamp:  base.Add(2 * time.Second),
+	})
+	store.AddEvent("sess-seq", Event{
+		Name:       "claude_code.api_request",
+		Attributes: map[string]string{"event.sequence": "2"},
+		Timestamp:  base.Add(3 * time.Second),
+	})
+
+	s := store.GetSession("sess-seq")
+	if len(s.Events) != 3 {
+		t.Fatalf("expected 3 events, got %d", len(s.Events))
+	}
+	// Events should be sorted by sequence: 1, 2, 3.
+	if s.Events[0].Sequence != 1 {
+		t.Errorf("expected first event sequence=1, got %d", s.Events[0].Sequence)
+	}
+	if s.Events[1].Sequence != 2 {
+		t.Errorf("expected second event sequence=2, got %d", s.Events[1].Sequence)
+	}
+	if s.Events[2].Sequence != 3 {
+		t.Errorf("expected third event sequence=3, got %d", s.Events[2].Sequence)
+	}
+}
+
+func TestStateStore_EventSequenceBeforeNoSequence(t *testing.T) {
+	store := NewMemoryStore()
+	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// Event without sequence (timestamp-based).
+	store.AddEvent("sess-seq2", Event{
+		Name:      "claude_code.user_prompt",
+		Timestamp: base,
+	})
+	// Event with sequence should sort before event without.
+	store.AddEvent("sess-seq2", Event{
+		Name:       "claude_code.api_request",
+		Attributes: map[string]string{"event.sequence": "1"},
+		Timestamp:  base.Add(1 * time.Second),
+	})
+
+	s := store.GetSession("sess-seq2")
+	if len(s.Events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(s.Events))
+	}
+	// Event with sequence should come first.
+	if s.Events[0].Sequence != 1 {
+		t.Errorf("expected sequenced event first, got sequence=%d", s.Events[0].Sequence)
+	}
+	if s.Events[1].Sequence != 0 {
+		t.Errorf("expected non-sequenced event second, got sequence=%d", s.Events[1].Sequence)
+	}
+}
+
+func TestStateStore_EventTimestampFallback(t *testing.T) {
+	store := NewMemoryStore()
+	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// Two events without sequences should sort by timestamp.
+	store.AddEvent("sess-ts", Event{
+		Name:      "claude_code.user_prompt",
+		Timestamp: base.Add(2 * time.Second),
+	})
+	store.AddEvent("sess-ts", Event{
+		Name:      "claude_code.user_prompt",
+		Timestamp: base,
+	})
+
+	s := store.GetSession("sess-ts")
+	if len(s.Events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(s.Events))
+	}
+	// Earlier timestamp should come first.
+	if !s.Events[0].Timestamp.Before(s.Events[1].Timestamp) {
+		t.Error("expected events sorted by timestamp (earlier first)")
+	}
+}
+
+func TestStateStore_CacheTokenExtraction(t *testing.T) {
+	store := NewMemoryStore()
+
+	// Event with both cache token attributes.
+	store.AddEvent("sess-cache", Event{
+		Name: "claude_code.api_request",
+		Attributes: map[string]string{
+			"model":                 "sonnet-4.5",
+			"cache_read_tokens":     "5000",
+			"cache_creation_tokens": "2000",
+		},
+		Timestamp: time.Now(),
+	})
+
+	s := store.GetSession("sess-cache")
+	if s == nil {
+		t.Fatal("expected session to exist")
+	}
+	if s.CacheReadTokens != 5000 {
+		t.Errorf("expected CacheReadTokens=5000, got %d", s.CacheReadTokens)
+	}
+	if s.CacheCreationTokens != 2000 {
+		t.Errorf("expected CacheCreationTokens=2000, got %d", s.CacheCreationTokens)
+	}
+}
+
+func TestStateStore_CacheTokenAccumulation(t *testing.T) {
+	store := NewMemoryStore()
+
+	// First event.
+	store.AddEvent("sess-cache", Event{
+		Name: "claude_code.api_request",
+		Attributes: map[string]string{
+			"cache_read_tokens":     "5000",
+			"cache_creation_tokens": "2000",
+		},
+		Timestamp: time.Now(),
+	})
+
+	// Second event — values should accumulate, not replace.
+	store.AddEvent("sess-cache", Event{
+		Name: "claude_code.api_request",
+		Attributes: map[string]string{
+			"cache_read_tokens":     "3000",
+			"cache_creation_tokens": "1000",
+		},
+		Timestamp: time.Now(),
+	})
+
+	s := store.GetSession("sess-cache")
+	if s.CacheReadTokens != 8000 {
+		t.Errorf("expected CacheReadTokens=8000, got %d", s.CacheReadTokens)
+	}
+	if s.CacheCreationTokens != 3000 {
+		t.Errorf("expected CacheCreationTokens=3000, got %d", s.CacheCreationTokens)
+	}
+}
+
+func TestStateStore_CacheTokenMissing(t *testing.T) {
+	store := NewMemoryStore()
+
+	// Event without cache token attributes.
+	store.AddEvent("sess-nocache", Event{
+		Name:       "claude_code.api_request",
+		Attributes: map[string]string{"model": "sonnet-4.5"},
+		Timestamp:  time.Now(),
+	})
+
+	s := store.GetSession("sess-nocache")
+	if s.CacheReadTokens != 0 {
+		t.Errorf("expected CacheReadTokens=0, got %d", s.CacheReadTokens)
+	}
+	if s.CacheCreationTokens != 0 {
+		t.Errorf("expected CacheCreationTokens=0, got %d", s.CacheCreationTokens)
+	}
+}
+
+func TestStateStore_CacheTokenMalformed(t *testing.T) {
+	store := NewMemoryStore()
+
+	// Malformed values should be ignored gracefully.
+	store.AddEvent("sess-bad", Event{
+		Name: "claude_code.api_request",
+		Attributes: map[string]string{
+			"cache_read_tokens":     "not-a-number",
+			"cache_creation_tokens": "",
+		},
+		Timestamp: time.Now(),
+	})
+
+	s := store.GetSession("sess-bad")
+	if s.CacheReadTokens != 0 {
+		t.Errorf("expected CacheReadTokens=0 for malformed value, got %d", s.CacheReadTokens)
+	}
+	if s.CacheCreationTokens != 0 {
+		t.Errorf("expected CacheCreationTokens=0 for empty value, got %d", s.CacheCreationTokens)
 	}
 }
 

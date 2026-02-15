@@ -62,10 +62,7 @@ func (m Model) renderEventStreamPanel(w, h int) string {
 		if focused {
 			borderStyle = borderStyle.BorderForeground(focusBorderColor)
 		}
-		return borderStyle.
-			Width(w - 2).
-			Height(h - 2).
-			Render(content)
+		return renderBorderedPanelStyled(content, w, h, borderStyle)
 	}
 
 	// Apply scroll position.
@@ -133,10 +130,7 @@ func (m Model) renderEventStreamPanel(w, h int) string {
 	if focused {
 		borderStyle = borderStyle.BorderForeground(focusBorderColor)
 	}
-	return borderStyle.
-		Width(w - 2).
-		Height(h - 2).
-		Render(content)
+	return renderBorderedPanelStyled(content, w, h, borderStyle)
 }
 
 // getFilteredEvents returns events matching the current filter.

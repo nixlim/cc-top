@@ -40,15 +40,18 @@ type ScannerConfig struct {
 
 // AlertsConfig configures alert thresholds and notification behaviour.
 type AlertsConfig struct {
-	CostSurgeThresholdPerHour float64            `toml:"cost_surge_threshold_per_hour"`
+	CostSurgeThresholdPerHour    float64            `toml:"cost_surge_threshold_per_hour"`
+	SessionCostThreshold         float64            `toml:"session_cost_threshold"`
 	RunawayTokenVelocity         int                `toml:"runaway_token_velocity"`
 	RunawayTokenSustainedMinutes int                `toml:"runaway_token_sustained_minutes"`
-	LoopDetectorThreshold     int                `toml:"loop_detector_threshold"`
-	LoopDetectorWindowMinutes int                `toml:"loop_detector_window_minutes"`
-	ErrorStormCount           int                `toml:"error_storm_count"`
-	StaleSessionHours         int                `toml:"stale_session_hours"`
-	ContextPressurePercent    int                `toml:"context_pressure_percent"`
-	Notifications             NotificationConfig `toml:"notifications"`
+	LoopDetectorThreshold        int                `toml:"loop_detector_threshold"`
+	LoopDetectorWindowMinutes    int                `toml:"loop_detector_window_minutes"`
+	ErrorStormCount              int                `toml:"error_storm_count"`
+	StaleSessionHours            int                `toml:"stale_session_hours"`
+	ContextPressurePercent       int                `toml:"context_pressure_percent"`
+	HighRejectionPercent         int                `toml:"high_rejection_percent"`
+	HighRejectionWindowMinutes   int                `toml:"high_rejection_window_minutes"`
+	Notifications                NotificationConfig `toml:"notifications"`
 }
 
 // NotificationConfig controls system notification behaviour.
@@ -209,6 +212,15 @@ func mergeFromRaw(cfg *Config, tf *tomlFile, raw map[string]any) {
 			}
 			if _, exists := section["context_pressure_percent"]; exists {
 				cfg.Alerts.ContextPressurePercent = tf.Alerts.ContextPressurePercent
+			}
+			if _, exists := section["session_cost_threshold"]; exists {
+				cfg.Alerts.SessionCostThreshold = tf.Alerts.SessionCostThreshold
+			}
+			if _, exists := section["high_rejection_percent"]; exists {
+				cfg.Alerts.HighRejectionPercent = tf.Alerts.HighRejectionPercent
+			}
+			if _, exists := section["high_rejection_window_minutes"]; exists {
+				cfg.Alerts.HighRejectionWindowMinutes = tf.Alerts.HighRejectionWindowMinutes
 			}
 			if _, exists := section["notifications"]; exists {
 				cfg.Alerts.Notifications = tf.Alerts.Notifications
@@ -383,6 +395,15 @@ func validate(cfg *Config) error {
 	}
 	if cfg.Alerts.ContextPressurePercent < 1 || cfg.Alerts.ContextPressurePercent > 100 {
 		errs = append(errs, fmt.Sprintf("context_pressure_percent must be 1-100, got %d", cfg.Alerts.ContextPressurePercent))
+	}
+	if cfg.Alerts.SessionCostThreshold <= 0 {
+		errs = append(errs, fmt.Sprintf("session_cost_threshold must be positive, got %f", cfg.Alerts.SessionCostThreshold))
+	}
+	if cfg.Alerts.HighRejectionPercent < 1 || cfg.Alerts.HighRejectionPercent > 100 {
+		errs = append(errs, fmt.Sprintf("high_rejection_percent must be 1-100, got %d", cfg.Alerts.HighRejectionPercent))
+	}
+	if cfg.Alerts.HighRejectionWindowMinutes < 1 {
+		errs = append(errs, fmt.Sprintf("high_rejection_window_minutes must be positive, got %d", cfg.Alerts.HighRejectionWindowMinutes))
 	}
 
 	// Positive buffer size.

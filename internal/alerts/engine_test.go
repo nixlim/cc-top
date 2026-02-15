@@ -447,8 +447,9 @@ func TestAlertContextPressure_UnknownModel(t *testing.T) {
 
 func TestAlertHighRejection_Fires(t *testing.T) {
 	store := state.NewMemoryStore()
+	cfg := defaultTestConfig()
 
-	rule := newHighRejectionRule()
+	rule := newHighRejectionRule(cfg.Alerts)
 
 	now := time.Now()
 
@@ -708,4 +709,170 @@ func TestNormalizerIntegration(t *testing.T) {
 	}
 
 	_ = fmt.Sprintf("hashes: %s, %s", h1, h4) // Use fmt to avoid import error.
+}
+
+func TestAlertSessionCost_Fires(t *testing.T) {
+	store := state.NewMemoryStore()
+	cfg := defaultTestConfig()
+
+	rule := newSessionCostRule(cfg.Alerts) // default threshold = $5.00
+
+	now := time.Now()
+
+	// Add a metric that sets TotalCost above threshold.
+	store.AddMetric("sess-expensive", state.Metric{
+		Name:      "claude_code.cost.usage",
+		Value:     6.50,
+		Timestamp: now,
+	})
+
+	alerts := rule.Evaluate(store, now)
+	if len(alerts) == 0 {
+		t.Fatal("expected SessionCost alert to fire")
+	}
+	if alerts[0].Rule != RuleSessionCost {
+		t.Errorf("expected rule %s, got %s", RuleSessionCost, alerts[0].Rule)
+	}
+	if alerts[0].SessionID != "sess-expensive" {
+		t.Errorf("expected session sess-expensive, got %s", alerts[0].SessionID)
+	}
+	if alerts[0].Severity != SeverityWarning {
+		t.Errorf("expected severity warning, got %s", alerts[0].Severity)
+	}
+}
+
+func TestAlertSessionCost_BelowThreshold(t *testing.T) {
+	store := state.NewMemoryStore()
+	cfg := defaultTestConfig()
+
+	rule := newSessionCostRule(cfg.Alerts)
+
+	now := time.Now()
+
+	// Add a metric with cost below threshold.
+	store.AddMetric("sess-cheap", state.Metric{
+		Name:      "claude_code.cost.usage",
+		Value:     2.50,
+		Timestamp: now,
+	})
+
+	alerts := rule.Evaluate(store, now)
+	if len(alerts) != 0 {
+		t.Errorf("expected no alert below threshold, got %d", len(alerts))
+	}
+}
+
+func TestAlertSessionCost_CustomThreshold(t *testing.T) {
+	store := state.NewMemoryStore()
+	cfg := defaultTestConfig()
+	cfg.Alerts.SessionCostThreshold = 1.00
+
+	rule := newSessionCostRule(cfg.Alerts)
+
+	now := time.Now()
+
+	store.AddMetric("sess-1", state.Metric{
+		Name:      "claude_code.cost.usage",
+		Value:     1.50,
+		Timestamp: now,
+	})
+
+	alerts := rule.Evaluate(store, now)
+	if len(alerts) == 0 {
+		t.Fatal("expected SessionCost alert with custom threshold $1.00")
+	}
+}
+
+func TestAlertHighRejection_CustomThreshold(t *testing.T) {
+	store := state.NewMemoryStore()
+	cfg := defaultTestConfig()
+	cfg.Alerts.HighRejectionPercent = 80
+	cfg.Alerts.HighRejectionWindowMinutes = 10
+
+	rule := newHighRejectionRule(cfg.Alerts)
+
+	now := time.Now()
+
+	// Add 10 tool decisions: 7 reject, 3 accept = 70% rejection rate.
+	// With threshold at 80%, this should NOT fire.
+	for i := 0; i < 7; i++ {
+		store.AddEvent("sess-1", state.Event{
+			Name: "claude_code.tool_decision",
+			Attributes: map[string]string{
+				"tool_name": "Bash",
+				"decision":  "reject",
+			},
+			Timestamp: now.Add(-time.Duration(9-i) * time.Minute),
+		})
+	}
+	for i := 0; i < 3; i++ {
+		store.AddEvent("sess-1", state.Event{
+			Name: "claude_code.tool_decision",
+			Attributes: map[string]string{
+				"tool_name": "Write",
+				"decision":  "accept",
+			},
+			Timestamp: now.Add(-time.Duration(2-i) * time.Minute),
+		})
+	}
+
+	alerts := rule.Evaluate(store, now)
+	if len(alerts) != 0 {
+		t.Errorf("expected no alert at 70%% with 80%% threshold, got %d", len(alerts))
+	}
+
+	// Add more rejections to push above 80% (13 reject / 16 total = 81.25%).
+	for i := 0; i < 6; i++ {
+		store.AddEvent("sess-1", state.Event{
+			Name: "claude_code.tool_decision",
+			Attributes: map[string]string{
+				"tool_name": "Bash",
+				"decision":  "reject",
+			},
+			Timestamp: now.Add(-time.Duration(1) * time.Minute),
+		})
+	}
+
+	alerts = rule.Evaluate(store, now)
+	if len(alerts) == 0 {
+		t.Fatal("expected HighRejection alert to fire at 80%+ rejection rate")
+	}
+}
+
+func TestAlertHighRejection_WindowRespected(t *testing.T) {
+	store := state.NewMemoryStore()
+	cfg := defaultTestConfig()
+	cfg.Alerts.HighRejectionPercent = 50
+	cfg.Alerts.HighRejectionWindowMinutes = 2
+
+	rule := newHighRejectionRule(cfg.Alerts)
+
+	now := time.Now()
+
+	// Add rejections outside the 2-minute window -- should be ignored.
+	for i := 0; i < 5; i++ {
+		store.AddEvent("sess-1", state.Event{
+			Name: "claude_code.tool_decision",
+			Attributes: map[string]string{
+				"tool_name": "Bash",
+				"decision":  "reject",
+			},
+			Timestamp: now.Add(-10 * time.Minute),
+		})
+	}
+
+	// Add accepts inside the window.
+	store.AddEvent("sess-1", state.Event{
+		Name: "claude_code.tool_decision",
+		Attributes: map[string]string{
+			"tool_name": "Write",
+			"decision":  "accept",
+		},
+		Timestamp: now.Add(-1 * time.Minute),
+	})
+
+	alerts := rule.Evaluate(store, now)
+	if len(alerts) != 0 {
+		t.Errorf("expected no alert when rejections are outside window, got %d", len(alerts))
+	}
 }

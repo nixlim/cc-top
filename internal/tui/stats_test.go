@@ -160,6 +160,42 @@ func TestRenderModelBreakdown_Empty(t *testing.T) {
 	}
 }
 
+func TestRenderTokenBreakdown(t *testing.T) {
+	cfg := config.DefaultConfig()
+	m := NewModel(cfg)
+
+	ds := stats.DashboardStats{
+		TokenBreakdown: map[string]int64{
+			"input":         50000,
+			"output":        25000,
+			"cacheRead":     100000,
+			"cacheCreation": 5000,
+		},
+	}
+
+	section := m.renderTokenBreakdownSection(ds)
+	if !strings.Contains(section, "Token Breakdown") {
+		t.Error("should contain 'Token Breakdown'")
+	}
+	if !strings.Contains(section, "50,000") {
+		t.Error("should contain formatted input count")
+	}
+	if !strings.Contains(section, "100,000") {
+		t.Error("should contain formatted cacheRead count")
+	}
+}
+
+func TestRenderTokenBreakdown_Empty(t *testing.T) {
+	cfg := config.DefaultConfig()
+	m := NewModel(cfg)
+
+	ds := stats.DashboardStats{}
+	section := m.renderTokenBreakdownSection(ds)
+	if !strings.Contains(section, "No token data") {
+		t.Error("empty token breakdown should show 'No token data'")
+	}
+}
+
 func TestRenderTopTools_Empty(t *testing.T) {
 	cfg := config.DefaultConfig()
 	m := NewModel(cfg)

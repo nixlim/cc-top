@@ -432,6 +432,140 @@ func TestOTLPReceiver_MalformedPayload(t *testing.T) {
 	}
 }
 
+func TestOTLPReceiver_GRPCMetrics_ResourceMetadata(t *testing.T) {
+	store := state.NewMemoryStore()
+	r, clients, conn := startTestGRPC(t, store, nil)
+	defer func() {
+		conn.Close()
+		r.Stop()
+	}()
+
+	ctx := context.Background()
+	ts := uint64(time.Now().UnixNano())
+
+	// Send a metric with resource attributes including metadata fields.
+	req := &colmetricspb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*metricspb.ResourceMetrics{
+			{
+				Resource: &resourcepb.Resource{
+					Attributes: []*commonpb.KeyValue{
+						{Key: "session.id", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "sess-meta-grpc"}}},
+						{Key: "service.version", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "1.0.32"}}},
+						{Key: "os.type", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "darwin"}}},
+						{Key: "os.version", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "24.1.0"}}},
+						{Key: "host.arch", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "arm64"}}},
+					},
+				},
+				ScopeMetrics: []*metricspb.ScopeMetrics{
+					{
+						Metrics: []*metricspb.Metric{
+							{
+								Name: "claude_code.cost.usage",
+								Data: &metricspb.Metric_Sum{
+									Sum: &metricspb.Sum{
+										DataPoints: []*metricspb.NumberDataPoint{
+											{
+												TimeUnixNano: ts,
+												Value:        &metricspb.NumberDataPoint_AsDouble{AsDouble: 0.10},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	_, err := clients.metrics.Export(ctx, req)
+	if err != nil {
+		t.Fatalf("Export failed: %v", err)
+	}
+
+	session := store.GetSession("sess-meta-grpc")
+	if session == nil {
+		t.Fatal("expected session to exist")
+	}
+	if session.Metadata.ServiceVersion != "1.0.32" {
+		t.Errorf("expected ServiceVersion=1.0.32, got %q", session.Metadata.ServiceVersion)
+	}
+	if session.Metadata.OSType != "darwin" {
+		t.Errorf("expected OSType=darwin, got %q", session.Metadata.OSType)
+	}
+	if session.Metadata.OSVersion != "24.1.0" {
+		t.Errorf("expected OSVersion=24.1.0, got %q", session.Metadata.OSVersion)
+	}
+	if session.Metadata.HostArch != "arm64" {
+		t.Errorf("expected HostArch=arm64, got %q", session.Metadata.HostArch)
+	}
+
+	// session.id extraction should still work.
+	if session.SessionID != "sess-meta-grpc" {
+		t.Errorf("expected SessionID=sess-meta-grpc, got %q", session.SessionID)
+	}
+}
+
+func TestOTLPReceiver_GRPCLogs_ResourceMetadata(t *testing.T) {
+	store := state.NewMemoryStore()
+	r, clients, conn := startTestGRPC(t, store, nil)
+	defer func() {
+		conn.Close()
+		r.Stop()
+	}()
+
+	ctx := context.Background()
+	ts := uint64(time.Now().UnixNano())
+
+	req := &collogspb.ExportLogsServiceRequest{
+		ResourceLogs: []*logspb.ResourceLogs{
+			{
+				Resource: &resourcepb.Resource{
+					Attributes: []*commonpb.KeyValue{
+						{Key: "session.id", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "sess-meta-logs"}}},
+						{Key: "service.version", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "1.0.32"}}},
+						{Key: "os.type", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "linux"}}},
+					},
+				},
+				ScopeLogs: []*logspb.ScopeLogs{
+					{
+						LogRecords: []*logspb.LogRecord{
+							{
+								TimeUnixNano: ts,
+								EventName:    "claude_code.user_prompt",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	_, err := clients.logs.Export(ctx, req)
+	if err != nil {
+		t.Fatalf("gRPC logs Export failed: %v", err)
+	}
+
+	session := store.GetSession("sess-meta-logs")
+	if session == nil {
+		t.Fatal("expected session to exist")
+	}
+	if session.Metadata.ServiceVersion != "1.0.32" {
+		t.Errorf("expected ServiceVersion=1.0.32, got %q", session.Metadata.ServiceVersion)
+	}
+	if session.Metadata.OSType != "linux" {
+		t.Errorf("expected OSType=linux, got %q", session.Metadata.OSType)
+	}
+	// Missing attributes should be empty strings.
+	if session.Metadata.OSVersion != "" {
+		t.Errorf("expected empty OSVersion, got %q", session.Metadata.OSVersion)
+	}
+	if session.Metadata.HostArch != "" {
+		t.Errorf("expected empty HostArch, got %q", session.Metadata.HostArch)
+	}
+}
+
 func TestOTLPReceiver_PortConflict(t *testing.T) {
 	// Bind to a port first to create a conflict.
 	lis, err := net.Listen("tcp", "127.0.0.1:0")

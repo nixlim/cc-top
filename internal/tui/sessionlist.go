@@ -90,10 +90,7 @@ func (m Model) renderSessionListPanel(w, h int) string {
 	}
 
 	content := strings.Join(lines, "\n")
-	return panelBorderStyle.
-		Width(w - 2).
-		Height(h - 2).
-		Render(content)
+	return renderBorderedPanel(content, w, h)
 }
 
 // formatSessionHeader returns the column header string.

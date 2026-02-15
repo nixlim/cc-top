@@ -4,6 +4,7 @@
 package burnrate
 
 import (
+	"sort"
 	"sync"
 	"time"
 
@@ -46,8 +47,9 @@ func (c *Calculator) Compute(store state.Store) BurnRate {
 	totalCost := store.GetAggregatedCost()
 
 	// Calculate total tokens across all sessions.
+	sessions := store.ListSessions()
 	var totalTokens int64
-	for _, s := range store.ListSessions() {
+	for _, s := range sessions {
 		totalTokens += s.TotalTokens
 	}
 
@@ -63,6 +65,7 @@ func (c *Calculator) Compute(store state.Store) BurnRate {
 			HourlyRate:    0,
 			Trend:         TrendFlat,
 			TokenVelocity: 0,
+			PerModel:      computePerModel(sessions, totalCost, 0),
 		}
 	}
 
@@ -98,10 +101,13 @@ func (c *Calculator) Compute(store state.Store) BurnRate {
 	tokenVelocity := c.computeTokenVelocity(now)
 
 	return BurnRate{
-		TotalCost:     totalCost,
-		HourlyRate:    hourlyRate,
-		Trend:         trend,
-		TokenVelocity: tokenVelocity,
+		TotalCost:         totalCost,
+		HourlyRate:        hourlyRate,
+		Trend:             trend,
+		TokenVelocity:     tokenVelocity,
+		PerModel:          computePerModel(sessions, totalCost, hourlyRate),
+		DailyProjection:   hourlyRate * 24,
+		MonthlyProjection: hourlyRate * 720,
 	}
 }
 
@@ -323,6 +329,38 @@ func pruneTokenSamples(samples []tokenSample, cutoff time.Time) []tokenSample {
 	return samples[:n]
 }
 
+// computePerModel aggregates cost by session model and computes proportional
+// hourly rates. Results are sorted by total cost descending.
+func computePerModel(sessions []state.SessionData, totalCost, hourlyRate float64) []ModelBurnRate {
+	modelCosts := make(map[string]float64)
+	for _, s := range sessions {
+		model := s.Model
+		if model == "" {
+			model = "unknown"
+		}
+		modelCosts[model] += s.TotalCost
+	}
+
+	result := make([]ModelBurnRate, 0, len(modelCosts))
+	for model, cost := range modelCosts {
+		var modelHourly float64
+		if totalCost > 0 {
+			modelHourly = (cost / totalCost) * hourlyRate
+		}
+		result = append(result, ModelBurnRate{
+			Model:      model,
+			HourlyRate: modelHourly,
+			TotalCost:  cost,
+		})
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].TotalCost > result[j].TotalCost
+	})
+
+	return result
+}
+
 // ComputeWithTime is like Compute but uses a specific timestamp instead of
 // time.Now(). This is primarily useful for testing deterministic behavior.
 func (c *Calculator) ComputeWithTime(store state.Store, now time.Time) BurnRate {
@@ -331,8 +369,9 @@ func (c *Calculator) ComputeWithTime(store state.Store, now time.Time) BurnRate 
 
 	totalCost := store.GetAggregatedCost()
 
+	sessions := store.ListSessions()
 	var totalTokens int64
-	for _, s := range store.ListSessions() {
+	for _, s := range sessions {
 		totalTokens += s.TotalTokens
 	}
 
@@ -347,6 +386,7 @@ func (c *Calculator) ComputeWithTime(store state.Store, now time.Time) BurnRate 
 			HourlyRate:    0,
 			Trend:         TrendFlat,
 			TokenVelocity: 0,
+			PerModel:      computePerModel(sessions, totalCost, 0),
 		}
 	}
 
@@ -374,9 +414,12 @@ func (c *Calculator) ComputeWithTime(store state.Store, now time.Time) BurnRate 
 	tokenVelocity := c.computeTokenVelocity(now)
 
 	return BurnRate{
-		TotalCost:     totalCost,
-		HourlyRate:    hourlyRate,
-		Trend:         trend,
-		TokenVelocity: tokenVelocity,
+		TotalCost:         totalCost,
+		HourlyRate:        hourlyRate,
+		Trend:             trend,
+		TokenVelocity:     tokenVelocity,
+		PerModel:          computePerModel(sessions, totalCost, hourlyRate),
+		DailyProjection:   hourlyRate * 24,
+		MonthlyProjection: hourlyRate * 720,
 	}
 }

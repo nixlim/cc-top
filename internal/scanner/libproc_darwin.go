@@ -198,6 +198,11 @@ func (d *darwinProcessAPI) GetProcessCWD(pid int) (string, error) {
 	return cwd, nil
 }
 
+// PgrepClaude uses pgrep as a fallback to find Claude Code PIDs.
+func (d *darwinProcessAPI) PgrepClaude() []int {
+	return pgrepClaude()
+}
+
 // GetOpenPorts returns local and remote port pairs for TCP sockets owned by pid.
 // Each entry is [localPort, remotePort].
 func (d *darwinProcessAPI) GetOpenPorts(pid int) ([][2]int, error) {

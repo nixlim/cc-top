@@ -116,9 +116,32 @@ func anyValueToString(v *commonpb.AnyValue) string {
 	}
 }
 
+// extractResourceMetadata extracts well-known resource attributes into SessionMetadata.
+func extractResourceMetadata(resource *resourcepb.Resource) state.SessionMetadata {
+	meta := state.SessionMetadata{}
+	if resource == nil {
+		return meta
+	}
+	for _, kv := range resource.GetAttributes() {
+		switch kv.GetKey() {
+		case "service.version":
+			meta.ServiceVersion = anyValueToString(kv.GetValue())
+		case "os.type":
+			meta.OSType = anyValueToString(kv.GetValue())
+		case "os.version":
+			meta.OSVersion = anyValueToString(kv.GetValue())
+		case "host.arch":
+			meta.HostArch = anyValueToString(kv.GetValue())
+		}
+	}
+	return meta
+}
+
 // extractMetrics converts OTLP metric data points into state.Metric values
 // and stores them in the state store, keyed by session ID.
 func extractMetrics(store state.Store, resource *resourcepb.Resource, metrics []*metricspb.Metric, sourcePort int, portMapper PortMapper) {
+	meta := extractResourceMetadata(resource)
+
 	for _, m := range metrics {
 		var dataPoints []*metricspb.NumberDataPoint
 
@@ -166,6 +189,11 @@ func extractMetrics(store state.Store, resource *resourcepb.Resource, metrics []
 			}
 
 			store.AddMetric(sessionID, sm)
+
+			// Update session metadata from resource attributes.
+			if sessionID != "" {
+				store.UpdateMetadata(sessionID, meta)
+			}
 		}
 	}
 }
@@ -191,6 +219,7 @@ func sourcePortFromAddr(addr net.Addr) int {
 func processLogExport(store state.Store, portMapper PortMapper, req *collogspb.ExportLogsServiceRequest, sourcePort int) {
 	for _, rl := range req.GetResourceLogs() {
 		resource := rl.GetResource()
+		meta := extractResourceMetadata(resource)
 
 		for _, sl := range rl.GetScopeLogs() {
 			for _, lr := range sl.GetLogRecords() {
@@ -223,6 +252,11 @@ func processLogExport(store state.Store, portMapper PortMapper, req *collogspb.E
 				}
 
 				store.AddEvent(sessionID, evt)
+
+				// Update session metadata from resource attributes.
+				if sessionID != "" {
+					store.UpdateMetadata(sessionID, meta)
+				}
 			}
 		}
 	}

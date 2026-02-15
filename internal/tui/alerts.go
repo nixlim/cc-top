@@ -35,10 +35,7 @@ func (m Model) renderAlertsPanel(w, h int) string {
 		if focused {
 			borderStyle = borderStyle.BorderForeground(focusBorderColor)
 		}
-		return borderStyle.
-			Width(w - 2).
-			Height(h - 2).
-			Render(statusLine)
+		return renderBorderedPanelStyled(statusLine, w, h, borderStyle)
 	}
 
 	var lines []string
@@ -101,11 +98,8 @@ func (m Model) renderAlertsPanel(w, h int) string {
 	if focused {
 		borderColor = focusBorderColor
 	}
-	return panelBorderStyle.
-		Width(w - 2).
-		Height(h - 2).
-		BorderForeground(borderColor).
-		Render(content)
+	return renderBorderedPanelStyled(content, w, h,
+		panelBorderStyle.BorderForeground(borderColor))
 }
 
 // getActiveAlerts retrieves alerts from the provider.

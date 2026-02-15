@@ -14,6 +14,7 @@ import (
 	"github.com/nixlim/cc-top/internal/state"
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
@@ -53,6 +54,7 @@ func (r *HTTPReceiver) Start(ctx context.Context) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/logs", r.handleLogs)
+	mux.HandleFunc("/v1/metrics", r.handleMetrics)
 
 	r.server = &http.Server{
 		Handler:      mux,
@@ -137,6 +139,62 @@ func (r *HTTPReceiver) decodeLogsRequest(contentType string, body []byte) (*coll
 		if err := proto.Unmarshal(body, exportReq); err != nil {
 			return nil, fmt.Errorf("protobuf decode: %w", err)
 		}
+	}
+
+	return exportReq, nil
+}
+
+// handleMetrics processes incoming OTLP HTTP metric export requests.
+// It accepts application/x-protobuf content type (default).
+// Invalid payloads receive an HTTP 400 response; the server continues operating.
+func (r *HTTPReceiver) handleMetrics(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		logReceiveError("HTTP", "reading metrics request body", err)
+		http.Error(w, "failed to read body", http.StatusBadRequest)
+		return
+	}
+	defer req.Body.Close()
+
+	// Extract source port from the remote address.
+	sourcePort := 0
+	if req.RemoteAddr != "" {
+		addr := &netAddr{network: "tcp", addr: req.RemoteAddr}
+		sourcePort = sourcePortFromAddr(addr)
+	}
+
+	exportReq, err := r.decodeMetricsRequest(req.Header.Get("Content-Type"), body)
+	if err != nil {
+		logReceiveError("HTTP", "decoding metrics payload", err)
+		http.Error(w, fmt.Sprintf("invalid payload: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	for _, rm := range exportReq.GetResourceMetrics() {
+		resource := rm.GetResource()
+		for _, sm := range rm.GetScopeMetrics() {
+			extractMetrics(r.store, resource, sm.GetMetrics(), sourcePort, r.portMapper)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("{}"))
+}
+
+// decodeMetricsRequest parses the metrics request body based on content type.
+// Supports application/x-protobuf (default).
+func (r *HTTPReceiver) decodeMetricsRequest(contentType string, body []byte) (*colmetricspb.ExportMetricsServiceRequest, error) {
+	exportReq := &colmetricspb.ExportMetricsServiceRequest{}
+
+	// Default to protobuf decoding.
+	if err := proto.Unmarshal(body, exportReq); err != nil {
+		return nil, fmt.Errorf("protobuf decode: %w", err)
 	}
 
 	return exportReq, nil

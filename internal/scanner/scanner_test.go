@@ -99,13 +99,17 @@ func (m *mockProcessAPI) GetOpenPorts(pid int) ([][2]int, error) {
 	return p.ports, nil
 }
 
+func (m *mockProcessAPI) PgrepClaude() []int {
+	return nil
+}
+
 func TestProcessScanner_DetectClaude(t *testing.T) {
 	api := newMockAPI()
 	api.addProcess(&mockProcess{
 		info: &RawProcessInfo{PID: 4821, BinaryName: "claude"},
 		args: []string{"/usr/local/bin/claude"},
 		env: map[string]string{
-			"CLAUDE_CODE_ENABLE_TELEMETRY":  "1",
+			"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
 			"OTEL_EXPORTER_OTLP_ENDPOINT":  "http://localhost:4317",
 			"TERM_PROGRAM":                 "iTerm.app",
 		},
@@ -172,7 +176,7 @@ func TestProcessScanner_DetectNodeClaude(t *testing.T) {
 			"/Users/testuser/.npm/_npx/abcdef/node_modules/@anthropic-ai/claude-code/cli.js",
 		},
 		env: map[string]string{
-			"CLAUDE_CODE_ENABLE_TELEMETRY":  "1",
+			"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
 			"OTEL_EXPORTER_OTLP_ENDPOINT":  "http://localhost:4317",
 			"VSCODE_PID":                   "1234",
 		},

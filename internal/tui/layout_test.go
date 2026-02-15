@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -145,6 +146,19 @@ func TestComputeDimensions_LargeTerminal(t *testing.T) {
 	}
 	if dims.alertsH <= 0 {
 		t.Errorf("alertsH = %d, want > 0", dims.alertsH)
+	}
+
+	// Height budget: header + burnRate + eventStream + alerts = totalH.
+	// The right column (burnRate + eventStream) must equal sessionListH.
+	rightH := dims.burnRateH + dims.eventStreamH
+	if rightH != dims.sessionListH {
+		t.Errorf("burnRateH(%d) + eventStreamH(%d) = %d, want sessionListH = %d",
+			dims.burnRateH, dims.eventStreamH, rightH, dims.sessionListH)
+	}
+	totalH := dims.headerH + dims.sessionListH + dims.alertsH
+	if totalH != 40 {
+		t.Errorf("headerH(%d) + sessionListH(%d) + alertsH(%d) = %d, want 40",
+			dims.headerH, dims.sessionListH, dims.alertsH, totalH)
 	}
 }
 
@@ -1116,6 +1130,104 @@ func TestModel_ViewClampedToTerminalHeight(t *testing.T) {
 			// Header should always be on the first line.
 			if len(lines) > 0 && !strings.Contains(lines[0], "cc-top") {
 				t.Errorf("first line = %q, want to contain 'cc-top'", lines[0])
+			}
+		})
+	}
+}
+
+// TestModel_AlertsBarVisible verifies that the alerts bar is never pushed
+// off-screen at various terminal sizes. The layout must be exactly m.height
+// lines with the alerts bar visible at the bottom.
+func TestModel_AlertsBarVisible(t *testing.T) {
+	cfg := config.DefaultConfig()
+	mockAlerts := &mockAlertProvider{
+		alerts: []alerts.Alert{
+			{Rule: "CostSurge", Severity: "critical", Message: "high burn", SessionID: "s1", FiredAt: time.Now()},
+		},
+	}
+	mockBR := &mockBurnRateProvider{
+		global: burnrate.BurnRate{TotalCost: 12345.67, HourlyRate: 5.0, TokenVelocity: 500},
+	}
+
+	sizes := []struct {
+		name   string
+		width  int
+		height int
+	}{
+		{"standard_80x24", 80, 24},
+		{"large_120x40", 120, 40},
+		{"wide_200x24", 200, 24},
+		{"short_80x15", 80, 15},
+		{"short_80x12", 80, 12},
+		{"minimum_40x10", 40, 10},
+		{"narrow_50x30", 50, 30},
+	}
+
+	for _, sz := range sizes {
+		t.Run(sz.name, func(t *testing.T) {
+			m := NewModel(cfg,
+				WithStartView(ViewDashboard),
+				WithAlertProvider(mockAlerts),
+				WithBurnRateProvider(mockBR),
+				WithStateProvider(&mockStateProvider{}),
+			)
+			m.width = sz.width
+			m.height = sz.height
+			// Populate cached burn rate so big digits render.
+			m.cachedBurnRate = mockBR.global
+
+			view := m.View()
+			lines := strings.Split(view, "\n")
+
+			if len(lines) > sz.height {
+				t.Errorf("View() has %d lines, want at most %d", len(lines), sz.height)
+			}
+
+			// The alerts bar should be visible somewhere in the output.
+			found := false
+			for _, line := range lines {
+				if strings.Contains(line, "CostSurge") || strings.Contains(line, "Alerts") || strings.Contains(line, "!!") {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("alerts bar content not found in view output (%d lines at %dx%d)",
+					len(lines), sz.width, sz.height)
+			}
+		})
+	}
+}
+
+// TestRenderBorderedPanel_ClampsContent verifies that renderBorderedPanel
+// produces output with exactly h lines, even when content overflows.
+func TestRenderBorderedPanel_ClampsContent(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentRows int
+		w, h        int
+	}{
+		{"content_fits", 4, 40, 8},
+		{"content_overflows", 10, 40, 8},
+		{"content_way_overflows", 20, 40, 8},
+		{"small_panel", 5, 40, 4},
+		{"tall_panel", 8, 60, 12},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var lines []string
+			for i := range tt.contentRows {
+				lines = append(lines, fmt.Sprintf("line %d content here", i))
+			}
+			content := strings.Join(lines, "\n")
+
+			result := renderBorderedPanel(content, tt.w, tt.h)
+			resultLines := strings.Split(result, "\n")
+
+			if len(resultLines) != tt.h {
+				t.Errorf("renderBorderedPanel() produced %d lines, want exactly %d",
+					len(resultLines), tt.h)
 			}
 		})
 	}

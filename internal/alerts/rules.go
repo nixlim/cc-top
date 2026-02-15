@@ -355,20 +355,49 @@ func (r *contextPressureRule) Evaluate(store state.Store, now time.Time) []Alert
 	return alerts
 }
 
-// highRejectionRule fires when tool rejection rate exceeds 50% in a 5-minute window.
-type highRejectionRule struct {
-	window time.Duration
+// sessionCostRule fires when a session's total cost exceeds a configured threshold.
+type sessionCostRule struct {
+	threshold float64
 }
 
-func newHighRejectionRule() *highRejectionRule {
+func newSessionCostRule(cfg config.AlertsConfig) *sessionCostRule {
+	return &sessionCostRule{threshold: cfg.SessionCostThreshold}
+}
+
+func (r *sessionCostRule) Evaluate(store state.Store, now time.Time) []Alert {
+	var alerts []Alert
+	for _, session := range store.ListSessions() {
+		if session.TotalCost > r.threshold {
+			alerts = append(alerts, Alert{
+				Rule:      RuleSessionCost,
+				Severity:  SeverityWarning,
+				SessionID: session.SessionID,
+				Message:   fmt.Sprintf("Session cost: $%.2f exceeds threshold $%.2f", session.TotalCost, r.threshold),
+				FiredAt:   now,
+			})
+		}
+	}
+	return alerts
+}
+
+// highRejectionRule fires when tool rejection rate exceeds a configurable threshold in a configurable window.
+type highRejectionRule struct {
+	window  time.Duration
+	percent float64
+}
+
+func newHighRejectionRule(cfg config.AlertsConfig) *highRejectionRule {
 	return &highRejectionRule{
-		window: 5 * time.Minute,
+		window:  time.Duration(cfg.HighRejectionWindowMinutes) * time.Minute,
+		percent: float64(cfg.HighRejectionPercent) / 100.0,
 	}
 }
 
 func (r *highRejectionRule) Evaluate(store state.Store, now time.Time) []Alert {
 	cutoff := now.Add(-r.window)
 	var alerts []Alert
+
+	windowMins := int(r.window / time.Minute)
 
 	for _, session := range store.ListSessions() {
 		var total, rejects int
@@ -387,12 +416,12 @@ func (r *highRejectionRule) Evaluate(store state.Store, now time.Time) []Alert {
 
 		if total > 0 {
 			rate := float64(rejects) / float64(total)
-			if rate > 0.50 {
+			if rate > r.percent {
 				alerts = append(alerts, Alert{
 					Rule:      RuleHighRejection,
 					Severity:  SeverityWarning,
 					SessionID: session.SessionID,
-					Message:   fmt.Sprintf("High rejection rate: %.0f%% of tool decisions rejected (%d/%d in 5min)", rate*100, rejects, total),
+					Message:   fmt.Sprintf("High rejection rate: %.0f%% of tool decisions rejected (%d/%d in %dmin)", rate*100, rejects, total, windowMins),
 					FiredAt:   now,
 				})
 			}

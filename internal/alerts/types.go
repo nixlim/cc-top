@@ -11,6 +11,7 @@ const (
 	RuleStaleSession    = "StaleSession"
 	RuleContextPressure = "ContextPressure"
 	RuleHighRejection   = "HighRejection"
+	RuleSessionCost     = "SessionCost"
 )
 
 // Alert severity constants.

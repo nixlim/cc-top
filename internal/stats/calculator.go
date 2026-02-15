@@ -12,11 +12,15 @@ import (
 )
 
 // Calculator computes aggregate statistics from state store data.
-type Calculator struct{}
+type Calculator struct {
+	pricing map[string][4]float64 // model -> [input, output, cacheRead, cacheCreation] per 1M tokens
+}
 
 // NewCalculator creates a new Calculator instance.
-func NewCalculator() *Calculator {
-	return &Calculator{}
+// pricing maps model name to [input, output, cacheRead, cacheCreation] price per 1M tokens.
+// Pass nil if pricing is not needed.
+func NewCalculator(pricing map[string][4]float64) *Calculator {
+	return &Calculator{pricing: pricing}
 }
 
 // Compute calculates the full DashboardStats from the given sessions.
@@ -36,6 +40,15 @@ func (c *Calculator) Compute(sessions []state.SessionData) DashboardStats {
 	stats.ModelBreakdown = c.computeModelBreakdown(sessions)
 	stats.TopTools = c.computeTopTools(sessions)
 	stats.ErrorRate = c.computeErrorRate(sessions)
+	stats.LanguageBreakdown = c.computeLanguageBreakdown(sessions)
+	stats.DecisionSources = c.computeDecisionSources(sessions)
+	stats.ErrorCategories = c.computeErrorCategories(sessions)
+	stats.RetryRate = c.computeRetryRate(sessions)
+	stats.ToolPerformance = c.computeToolPerformance(sessions)
+	stats.LatencyPercentiles = c.computeLatencyPercentiles(sessions)
+	stats.TokenBreakdown = c.computeTokenBreakdown(sessions)
+	stats.CacheSavingsUSD = c.computeCacheSavings(sessions)
+	stats.MCPToolUsage = c.computeMCPToolUsage(sessions)
 
 	return stats
 }
@@ -308,4 +321,313 @@ func (c *Calculator) computeErrorRate(sessions []state.SessionData) float64 {
 		return 0
 	}
 	return float64(apiErrors) / float64(apiRequests)
+}
+
+// computeLanguageBreakdown counts the language attribute from
+// code_edit_tool.decision metrics across all sessions.
+func (c *Calculator) computeLanguageBreakdown(sessions []state.SessionData) map[string]int {
+	langs := make(map[string]int)
+	for i := range sessions {
+		for _, m := range sessions[i].Metrics {
+			if m.Name != "claude_code.code_edit_tool.decision" {
+				continue
+			}
+			lang := m.Attributes["language"]
+			if lang != "" {
+				langs[lang]++
+			}
+		}
+	}
+	return langs
+}
+
+// computeDecisionSources counts the source attribute from
+// tool_decision events across all sessions.
+func (c *Calculator) computeDecisionSources(sessions []state.SessionData) map[string]int {
+	sources := make(map[string]int)
+	for i := range sessions {
+		for _, e := range sessions[i].Events {
+			if e.Name != "claude_code.tool_decision" {
+				continue
+			}
+			src := e.Attributes["source"]
+			if src != "" {
+				sources[src]++
+			}
+		}
+	}
+	return sources
+}
+
+// computeErrorCategories categorizes api_error events by status_code bucket:
+// 429 -> rate_limit, 401/403 -> auth_failure, 5xx -> server_error, other -> other.
+func (c *Calculator) computeErrorCategories(sessions []state.SessionData) map[string]int {
+	cats := make(map[string]int)
+	for i := range sessions {
+		for _, e := range sessions[i].Events {
+			if e.Name != "claude_code.api_error" {
+				continue
+			}
+			codeStr := e.Attributes["status_code"]
+			if codeStr == "" {
+				cats["other"]++
+				continue
+			}
+			code, err := strconv.Atoi(codeStr)
+			if err != nil {
+				cats["other"]++
+				continue
+			}
+			switch {
+			case code == 429:
+				cats["rate_limit"]++
+			case code == 401 || code == 403:
+				cats["auth_failure"]++
+			case code >= 500 && code <= 599:
+				cats["server_error"]++
+			default:
+				cats["other"]++
+			}
+		}
+	}
+	return cats
+}
+
+// computeRetryRate returns the fraction of api_error events with attempt >= 2.
+// Returns 0 when there are no api_error events.
+func (c *Calculator) computeRetryRate(sessions []state.SessionData) float64 {
+	var total, retries int
+	for i := range sessions {
+		for _, e := range sessions[i].Events {
+			if e.Name != "claude_code.api_error" {
+				continue
+			}
+			total++
+			attemptStr := e.Attributes["attempt"]
+			if attemptStr == "" {
+				continue
+			}
+			attempt, err := strconv.Atoi(attemptStr)
+			if err != nil {
+				continue
+			}
+			if attempt >= 2 {
+				retries++
+			}
+		}
+	}
+	if total == 0 {
+		return 0
+	}
+	return float64(retries) / float64(total)
+}
+
+// computeToolPerformance computes avg and P95 duration_ms per tool_name
+// from tool_result events. Tools without duration_ms are excluded.
+func (c *Calculator) computeToolPerformance(sessions []state.SessionData) []ToolPerf {
+	durations := make(map[string][]float64)
+	for i := range sessions {
+		for _, e := range sessions[i].Events {
+			if e.Name != "claude_code.tool_result" {
+				continue
+			}
+			toolName := e.Attributes["tool_name"]
+			if toolName == "" {
+				continue
+			}
+			durStr := e.Attributes["duration_ms"]
+			if durStr == "" {
+				continue
+			}
+			dur, err := strconv.ParseFloat(durStr, 64)
+			if err != nil {
+				continue
+			}
+			durations[toolName] = append(durations[toolName], dur)
+		}
+	}
+
+	result := make([]ToolPerf, 0, len(durations))
+	for name, durs := range durations {
+		sort.Float64s(durs)
+		var sum float64
+		for _, d := range durs {
+			sum += d
+		}
+		avg := sum / float64(len(durs))
+		p95 := percentile(durs, 0.95)
+		result = append(result, ToolPerf{
+			ToolName:      name,
+			AvgDurationMS: avg,
+			P95DurationMS: p95,
+		})
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].AvgDurationMS > result[j].AvgDurationMS
+	})
+	return result
+}
+
+// computeLatencyPercentiles computes P50, P95, P99 from api_request
+// duration_ms values. Returns all zeros when no events exist.
+func (c *Calculator) computeLatencyPercentiles(sessions []state.SessionData) LatencyPercentiles {
+	var durations []float64
+	for i := range sessions {
+		for _, e := range sessions[i].Events {
+			if e.Name != "claude_code.api_request" {
+				continue
+			}
+			durStr := e.Attributes["duration_ms"]
+			if durStr == "" {
+				continue
+			}
+			dur, err := strconv.ParseFloat(durStr, 64)
+			if err != nil {
+				continue
+			}
+			durations = append(durations, dur)
+		}
+	}
+
+	if len(durations) == 0 {
+		return LatencyPercentiles{}
+	}
+
+	sort.Float64s(durations)
+	return LatencyPercentiles{
+		P50: percentile(durations, 0.50) / 1000.0,
+		P95: percentile(durations, 0.95) / 1000.0,
+		P99: percentile(durations, 0.99) / 1000.0,
+	}
+}
+
+// percentile returns the p-th percentile from a sorted slice using
+// nearest-rank method. The slice must be sorted and non-empty.
+func percentile(sorted []float64, p float64) float64 {
+	if len(sorted) == 0 {
+		return 0
+	}
+	idx := int(p * float64(len(sorted)))
+	if idx >= len(sorted) {
+		idx = len(sorted) - 1
+	}
+	return sorted[idx]
+}
+
+// computeTokenBreakdown sums the latest token.usage values per session
+// for each type: input, output, cacheRead, cacheCreation.
+func (c *Calculator) computeTokenBreakdown(sessions []state.SessionData) map[string]int64 {
+	breakdown := map[string]int64{
+		"input":         0,
+		"output":        0,
+		"cacheRead":     0,
+		"cacheCreation": 0,
+	}
+
+	tokenTypes := []string{"input", "output", "cacheRead", "cacheCreation"}
+
+	for i := range sessions {
+		latest := make(map[string]float64)
+		for _, m := range sessions[i].Metrics {
+			if m.Name != "claude_code.token.usage" {
+				continue
+			}
+			t := m.Attributes["type"]
+			for _, tt := range tokenTypes {
+				if t == tt {
+					latest[tt] = m.Value
+					break
+				}
+			}
+		}
+		for tt, val := range latest {
+			breakdown[tt] += int64(val)
+		}
+	}
+	return breakdown
+}
+
+// computeCacheSavings calculates USD saved by cache hits using pricing config.
+// Savings = cache_read_tokens * (input_price - cache_read_price) / 1_000_000.
+func (c *Calculator) computeCacheSavings(sessions []state.SessionData) float64 {
+	if c.pricing == nil {
+		return 0
+	}
+
+	var totalSavings float64
+	for i := range sessions {
+		model := sessions[i].Model
+		if model == "" {
+			continue
+		}
+		prices, ok := c.pricing[model]
+		if !ok {
+			continue
+		}
+		inputPrice := prices[0]
+		cacheReadPrice := prices[2]
+		cacheReadTokens := sessions[i].CacheReadTokens
+		if cacheReadTokens <= 0 {
+			continue
+		}
+		totalSavings += float64(cacheReadTokens) * (inputPrice - cacheReadPrice) / 1_000_000.0
+	}
+	return totalSavings
+}
+
+// computeMCPToolUsage counts MCP tool usage from tool_result events
+// by checking tool_parameters JSON for mcp_server_name and mcp_tool_name.
+func (c *Calculator) computeMCPToolUsage(sessions []state.SessionData) map[string]int {
+	usage := make(map[string]int)
+	for i := range sessions {
+		for _, e := range sessions[i].Events {
+			if e.Name != "claude_code.tool_result" {
+				continue
+			}
+			toolParams := e.Attributes["tool_parameters"]
+			if toolParams == "" {
+				continue
+			}
+			mcpServer, mcpTool := extractMCPNames(toolParams)
+			if mcpServer != "" && mcpTool != "" {
+				key := mcpServer + ":" + mcpTool
+				usage[key]++
+			}
+		}
+	}
+	return usage
+}
+
+// extractMCPNames parses tool_parameters JSON for mcp_server_name and mcp_tool_name.
+func extractMCPNames(toolParams string) (server, tool string) {
+	// Simple JSON extraction without importing encoding/json to keep it lightweight.
+	// Look for "mcp_server_name":"value" and "mcp_tool_name":"value".
+	server = extractJSONString(toolParams, "mcp_server_name")
+	tool = extractJSONString(toolParams, "mcp_tool_name")
+	return
+}
+
+// extractJSONString does a simple extraction of a string value for a key from JSON.
+func extractJSONString(json, key string) string {
+	needle := `"` + key + `"`
+	idx := strings.Index(json, needle)
+	if idx < 0 {
+		return ""
+	}
+	// Skip past key and find colon.
+	rest := json[idx+len(needle):]
+	// Skip whitespace and colon.
+	for len(rest) > 0 && (rest[0] == ' ' || rest[0] == ':') {
+		rest = rest[1:]
+	}
+	if len(rest) == 0 || rest[0] != '"' {
+		return ""
+	}
+	rest = rest[1:] // skip opening quote
+	end := strings.IndexByte(rest, '"')
+	if end < 0 {
+		return ""
+	}
+	return rest[:end]
 }

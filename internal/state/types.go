@@ -13,21 +13,36 @@ type SessionData struct {
 	Terminal    string
 	CWD         string
 	Model       string
-	TotalCost   float64
-	TotalTokens int64
-	ActiveTime  time.Duration
+	TotalCost           float64
+	TotalTokens         int64
+	CacheReadTokens     int64
+	CacheCreationTokens int64
+	ActiveTime          time.Duration
 	LastEventAt time.Time
 	StartedAt   time.Time
 	Exited      bool
 	IsNew       bool // "New" badge for one scan cycle
+	FastMode    bool
+	OrgID       string
+	UserUUID    string
 
 	Metrics []Metric
 	Events  []Event
+
+	Metadata SessionMetadata
 
 	// PreviousValues tracks the last-seen counter value for each metric key
 	// to support delta computation and counter reset detection.
 	// Key format: "metric_name|attr1=val1,attr2=val2"
 	PreviousValues map[string]float64
+}
+
+// SessionMetadata holds metadata extracted from OTLP resource attributes.
+type SessionMetadata struct {
+	ServiceVersion string
+	OSType         string
+	OSVersion      string
+	HostArch       string
 }
 
 // Status returns the current activity status of the session based on
@@ -64,6 +79,7 @@ type Event struct {
 	Name       string
 	Attributes map[string]string
 	Timestamp  time.Time
+	Sequence   int64
 }
 
 // SessionStatus represents the activity status of a session.

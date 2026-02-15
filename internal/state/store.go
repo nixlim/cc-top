@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +38,9 @@ type Store interface {
 
 	// MarkExited marks all sessions associated with the given PID as exited.
 	MarkExited(pid int)
+
+	// UpdateMetadata updates the session metadata for the given session.
+	UpdateMetadata(sessionID string, meta SessionMetadata)
 }
 
 // EventListener is a callback invoked after a new event is stored.
@@ -122,6 +126,22 @@ func (ms *MemoryStore) AddMetric(sessionID string, m Metric) {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
+	// For session.count metrics, create the session with the metric timestamp
+	// instead of time.Now() so StartedAt reflects the actual session start.
+	if m.Name == "claude_code.session.count" {
+		if _, exists := ms.sessions[sessionID]; !exists {
+			ts := m.Timestamp
+			if ts.IsZero() {
+				ts = time.Now()
+			}
+			ms.sessions[sessionID] = &SessionData{
+				SessionID:      sessionID,
+				StartedAt:      ts,
+				PreviousValues: make(map[string]float64),
+			}
+		}
+	}
+
 	s := ms.getOrCreateSession(sessionID)
 	s.Metrics = append(s.Metrics, m)
 
@@ -166,6 +186,19 @@ func (ms *MemoryStore) AddMetric(sessionID string, m Metric) {
 	if terminal, ok := m.Attributes["terminal.type"]; ok && terminal != "" {
 		s.Terminal = terminal
 	}
+
+	// Track fast mode from speed attribute.
+	if speed, ok := m.Attributes["speed"]; ok && speed != "" {
+		s.FastMode = true
+	}
+
+	// Extract org and user identity attributes.
+	if orgID, ok := m.Attributes["organization.id"]; ok && orgID != "" {
+		s.OrgID = orgID
+	}
+	if userUUID, ok := m.Attributes["user.account_uuid"]; ok && userUUID != "" {
+		s.UserUUID = userUUID
+	}
 }
 
 // AddEvent indexes an event under the given session ID.
@@ -175,7 +208,30 @@ func (ms *MemoryStore) AddEvent(sessionID string, e Event) {
 	ms.mu.Lock()
 
 	s := ms.getOrCreateSession(sessionID)
+
+	// Extract sequence number from event attributes.
+	if seqStr, ok := e.Attributes["event.sequence"]; ok {
+		if seq, err := strconv.ParseInt(seqStr, 10, 64); err == nil {
+			e.Sequence = seq
+		}
+	}
+
 	s.Events = append(s.Events, e)
+
+	// Keep events sorted by sequence (primary) then timestamp (secondary).
+	sort.SliceStable(s.Events, func(i, j int) bool {
+		ei, ej := s.Events[i], s.Events[j]
+		if ei.Sequence != 0 && ej.Sequence != 0 {
+			return ei.Sequence < ej.Sequence
+		}
+		if ei.Sequence != 0 && ej.Sequence == 0 {
+			return true
+		}
+		if ei.Sequence == 0 && ej.Sequence != 0 {
+			return false
+		}
+		return ei.Timestamp.Before(ej.Timestamp)
+	})
 
 	if !e.Timestamp.IsZero() {
 		s.LastEventAt = e.Timestamp
@@ -183,11 +239,36 @@ func (ms *MemoryStore) AddEvent(sessionID string, e Event) {
 		s.LastEventAt = time.Now()
 	}
 
-	// Extract model from api_request events.
+	// Extract model and cache tokens from api_request events.
 	if e.Name == "claude_code.api_request" {
 		if model, ok := e.Attributes["model"]; ok && model != "" {
 			s.Model = model
 		}
+		if v, ok := e.Attributes["cache_read_tokens"]; ok {
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+				s.CacheReadTokens += n
+			}
+		}
+		if v, ok := e.Attributes["cache_creation_tokens"]; ok {
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+				s.CacheCreationTokens += n
+			}
+		}
+	}
+
+	// Track fast mode from speed attribute.
+	if speed, ok := e.Attributes["speed"]; ok && speed != "" {
+		s.FastMode = true
+	} else {
+		s.FastMode = false
+	}
+
+	// Extract org and user identity attributes.
+	if orgID, ok := e.Attributes["organization.id"]; ok && orgID != "" {
+		s.OrgID = orgID
+	}
+	if userUUID, ok := e.Attributes["user.account_uuid"]; ok && userUUID != "" {
+		s.UserUUID = userUUID
 	}
 
 	// Snapshot listeners while holding the lock.
@@ -266,6 +347,28 @@ func (ms *MemoryStore) MarkExited(pid int) {
 		if s.PID == pid {
 			s.Exited = true
 		}
+	}
+}
+
+// UpdateMetadata updates the session metadata for the given session.
+func (ms *MemoryStore) UpdateMetadata(sessionID string, meta SessionMetadata) {
+	sessionID = resolveSessionID(sessionID)
+
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+
+	s := ms.getOrCreateSession(sessionID)
+	if meta.ServiceVersion != "" {
+		s.Metadata.ServiceVersion = meta.ServiceVersion
+	}
+	if meta.OSType != "" {
+		s.Metadata.OSType = meta.OSType
+	}
+	if meta.OSVersion != "" {
+		s.Metadata.OSVersion = meta.OSVersion
+	}
+	if meta.HostArch != "" {
+		s.Metadata.HostArch = meta.HostArch
 	}
 }
 

@@ -248,3 +248,160 @@ func TestBurnRate_CounterReset(t *testing.T) {
 		t.Errorf("expected non-negative total cost after counter reset, got %f", br.TotalCost)
 	}
 }
+
+func TestBurnRate_PerModelBreakdown(t *testing.T) {
+	store := state.NewMemoryStore()
+	calc := NewCalculator(DefaultThresholds())
+
+	base := time.Now().Add(-6 * time.Minute)
+
+	// Session 1 uses opus with $0.60 cost.
+	store.AddMetric("sess-1", state.Metric{
+		Name:       "claude_code.cost.usage",
+		Value:      0.60,
+		Attributes: map[string]string{"model": "claude-opus-4-6"},
+		Timestamp:  base,
+	})
+
+	// Session 2 uses sonnet with $0.40 cost.
+	store.AddMetric("sess-2", state.Metric{
+		Name:       "claude_code.cost.usage",
+		Value:      0.40,
+		Attributes: map[string]string{"model": "claude-sonnet-4-5-20250929"},
+		Timestamp:  base,
+	})
+
+	_ = calc.ComputeWithTime(store, base)
+
+	// Add more cost to trigger rate computation.
+	store.AddMetric("sess-1", state.Metric{
+		Name:       "claude_code.cost.usage",
+		Value:      1.20,
+		Attributes: map[string]string{"model": "claude-opus-4-6"},
+		Timestamp:  base.Add(5 * time.Minute),
+	})
+	store.AddMetric("sess-2", state.Metric{
+		Name:       "claude_code.cost.usage",
+		Value:      0.80,
+		Attributes: map[string]string{"model": "claude-sonnet-4-5-20250929"},
+		Timestamp:  base.Add(5 * time.Minute),
+	})
+
+	br := calc.ComputeWithTime(store, base.Add(5*time.Minute))
+
+	if len(br.PerModel) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(br.PerModel))
+	}
+
+	// Sorted by cost descending: opus ($1.20) before sonnet ($0.80).
+	if br.PerModel[0].Model != "claude-opus-4-6" {
+		t.Errorf("expected first model to be opus, got %q", br.PerModel[0].Model)
+	}
+	if math.Abs(br.PerModel[0].TotalCost-1.20) > 0.01 {
+		t.Errorf("expected opus TotalCost ~1.20, got %f", br.PerModel[0].TotalCost)
+	}
+	if br.PerModel[1].Model != "claude-sonnet-4-5-20250929" {
+		t.Errorf("expected second model to be sonnet, got %q", br.PerModel[1].Model)
+	}
+	if math.Abs(br.PerModel[1].TotalCost-0.80) > 0.01 {
+		t.Errorf("expected sonnet TotalCost ~0.80, got %f", br.PerModel[1].TotalCost)
+	}
+
+	// Hourly rates should be proportional.
+	if br.HourlyRate > 0 {
+		opusShare := br.PerModel[0].HourlyRate / br.HourlyRate
+		if math.Abs(opusShare-0.60) > 0.05 {
+			t.Errorf("expected opus hourly share ~0.60, got %f", opusShare)
+		}
+	}
+}
+
+func TestBurnRate_PerModelUnknown(t *testing.T) {
+	store := state.NewMemoryStore()
+	calc := NewCalculator(DefaultThresholds())
+
+	base := time.Now().Add(-6 * time.Minute)
+
+	// Session with no model attribute.
+	store.AddMetric("sess-1", state.Metric{
+		Name:       "claude_code.cost.usage",
+		Value:      0.50,
+		Attributes: map[string]string{},
+		Timestamp:  base,
+	})
+
+	br := calc.ComputeWithTime(store, base)
+
+	if len(br.PerModel) != 1 {
+		t.Fatalf("expected 1 model entry, got %d", len(br.PerModel))
+	}
+	if br.PerModel[0].Model != "unknown" {
+		t.Errorf("expected model name 'unknown', got %q", br.PerModel[0].Model)
+	}
+}
+
+func TestBurnRate_Projections(t *testing.T) {
+	store := state.NewMemoryStore()
+	calc := NewCalculator(DefaultThresholds())
+
+	base := time.Now().Add(-6 * time.Minute)
+
+	addCostMetric(store, "sess-1", 0.0, base)
+	_ = calc.ComputeWithTime(store, base)
+
+	// Accumulate $1.00 over 5 minutes => $12.00/hr.
+	addCostMetric(store, "sess-1", 1.00, base.Add(5*time.Minute))
+	br := calc.ComputeWithTime(store, base.Add(5*time.Minute))
+
+	// Verify projections = hourlyRate * 24 and * 720.
+	expectedDaily := br.HourlyRate * 24
+	expectedMonthly := br.HourlyRate * 720
+
+	if math.Abs(br.DailyProjection-expectedDaily) > 0.01 {
+		t.Errorf("DailyProjection = %f, want %f", br.DailyProjection, expectedDaily)
+	}
+	if math.Abs(br.MonthlyProjection-expectedMonthly) > 0.01 {
+		t.Errorf("MonthlyProjection = %f, want %f", br.MonthlyProjection, expectedMonthly)
+	}
+}
+
+func TestBurnRate_ProjectionsZero(t *testing.T) {
+	store := state.NewMemoryStore()
+	calc := NewCalculator(DefaultThresholds())
+
+	// First call: hourly rate is 0.
+	br := calc.ComputeWithTime(store, time.Now())
+
+	if br.DailyProjection != 0 {
+		t.Errorf("expected DailyProjection = 0, got %f", br.DailyProjection)
+	}
+	if br.MonthlyProjection != 0 {
+		t.Errorf("expected MonthlyProjection = 0, got %f", br.MonthlyProjection)
+	}
+}
+
+func TestBurnRate_ProjectionsFromHourlyRate(t *testing.T) {
+	store := state.NewMemoryStore()
+	calc := NewCalculator(DefaultThresholds())
+
+	base := time.Now().Add(-6 * time.Minute)
+
+	// Create a scenario where hourly rate ~= $1.00/hr.
+	// $1/12 per minute for 5 minutes = ~$1.00/hr.
+	addCostMetric(store, "sess-1", 0.0, base)
+	_ = calc.ComputeWithTime(store, base)
+
+	// $0.0833 over 5 min => hourlyRate ~= $1.00/hr.
+	addCostMetric(store, "sess-1", 0.0833, base.Add(5*time.Minute))
+	br := calc.ComputeWithTime(store, base.Add(5*time.Minute))
+
+	// With ~$1.00/hr: daily ~$24, monthly ~$720.
+	if br.HourlyRate > 0.5 && br.HourlyRate < 1.5 {
+		if math.Abs(br.DailyProjection-24.0) > 12.0 {
+			t.Errorf("expected DailyProjection ~24, got %f", br.DailyProjection)
+		}
+		if math.Abs(br.MonthlyProjection-720.0) > 360.0 {
+			t.Errorf("expected MonthlyProjection ~720, got %f", br.MonthlyProjection)
+		}
+	}
+}

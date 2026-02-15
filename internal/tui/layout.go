@@ -33,8 +33,13 @@ const (
 	// alertsHeight is the height of the bottom alerts bar.
 	alertsHeight = 3
 
-	// burnRateHeight is the fixed height of the burn rate panel.
-	burnRateMinHeight = 8
+	// burnRateMinHeight is the minimum height of the burn rate panel.
+	// Plain text mode: title(1) + cost(1) + rate(1) + velocity(1) = 4 content + 2 border = 6.
+	burnRateMinHeight = 6
+
+	// burnRateLargeHeight is the ideal height for the large digit font.
+	// Large digits: title(1) + digits(5) + rate(1) + velocity(1) = 8 content + 2 border = 10.
+	burnRateLargeHeight = 10
 )
 
 // computeDimensions calculates panel sizes from terminal dimensions.
@@ -72,9 +77,20 @@ func computeDimensions(totalW, totalH int) panelDimensions {
 		rightW = 20
 	}
 
-	// Burn rate panel: fixed height at top right.
+	// Burn rate panel: dynamic height — use the large font when there's
+	// room, medium when moderate, plain text when tight. The panel never
+	// takes more than 40% of the usable area so the event stream stays
+	// useful.
 	d.burnRateW = rightW
-	d.burnRateH = burnRateMinHeight
+	maxBR := usableH * 40 / 100
+	if maxBR < burnRateMinHeight {
+		maxBR = burnRateMinHeight
+	}
+	if maxBR >= burnRateLargeHeight {
+		d.burnRateH = burnRateLargeHeight
+	} else {
+		d.burnRateH = maxBR
+	}
 	if d.burnRateH > usableH/2 {
 		d.burnRateH = usableH / 2
 	}
@@ -199,6 +215,34 @@ var (
 				Padding(1, 2)
 )
 
+// renderBorderedPanel wraps content in a bordered panel, clamping the content
+// to fit exactly within the given dimensions. Lipgloss Height() only pads
+// short content — it does not truncate overflow. This helper ensures content
+// never exceeds the panel height so layouts remain pixel-accurate.
+func renderBorderedPanel(content string, w, h int) string {
+	return renderBorderedPanelStyled(content, w, h, panelBorderStyle)
+}
+
+// renderBorderedPanelStyled is like renderBorderedPanel but with a custom border style.
+func renderBorderedPanelStyled(content string, w, h int, style lipgloss.Style) string {
+	contentH := h - 2 // border top + bottom
+	if contentH < 1 {
+		contentH = 1
+	}
+
+	// Clamp content lines to fit within the border.
+	lines := strings.Split(content, "\n")
+	if len(lines) > contentH {
+		lines = lines[:contentH]
+		content = strings.Join(lines, "\n")
+	}
+
+	return style.
+		Width(w - 2).
+		Height(contentH).
+		Render(content)
+}
+
 // ansiRe matches ANSI escape sequences for stripping.
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
@@ -226,6 +270,17 @@ func (m Model) renderDashboard() string {
 
 	// Main content: session list left, right column right.
 	mainContent := lipgloss.JoinHorizontal(lipgloss.Top, sessionList, rightCol)
+
+	// Clamp mainContent to usableH so the alerts bar is never pushed off-screen.
+	usableH := m.height - dims.headerH - dims.alertsH
+	if usableH < 4 {
+		usableH = 4
+	}
+	mcLines := strings.Split(mainContent, "\n")
+	if len(mcLines) > usableH {
+		mcLines = mcLines[:usableH]
+		mainContent = strings.Join(mcLines, "\n")
+	}
 
 	// Compose full layout: header, main content, alerts.
 	layout := lipgloss.JoinVertical(lipgloss.Left, header, mainContent, alertsBar)

@@ -80,7 +80,8 @@ func NewEngine(store state.Store, cfg config.Config, calculator *burnrate.Calcul
 		newErrorStormRule(cfg.Alerts),
 		newStaleSessionRule(cfg.Alerts),
 		newContextPressureRule(cfg.Alerts, cfg.Models),
-		newHighRejectionRule(),
+		newHighRejectionRule(cfg.Alerts),
+		newSessionCostRule(cfg.Alerts),
 	}
 
 	return e

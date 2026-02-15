@@ -13,8 +13,10 @@ import (
 	"github.com/nixlim/cc-top/internal/state"
 
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
+	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -39,6 +41,7 @@ func startTestHTTP(t *testing.T, store state.Store, pm PortMapper) *HTTPReceiver
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/logs", r.handleLogs)
+	mux.HandleFunc("/v1/metrics", r.handleMetrics)
 	r.server = &http.Server{
 		Handler:      mux,
 		ReadTimeout:  10 * time.Second,
@@ -268,6 +271,253 @@ func TestOTLPReceiver_HTTPEvents(t *testing.T) {
 
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("expected status 400 for invalid JSON, got %d", resp.StatusCode)
+		}
+	})
+}
+
+func TestOTLPReceiver_HTTPEvents_ResourceMetadata(t *testing.T) {
+	store := state.NewMemoryStore()
+	r := startTestHTTP(t, store, nil)
+	defer r.Stop()
+
+	// Build an OTLP log export request with resource metadata attributes.
+	ts := uint64(time.Now().UnixNano())
+	req := &collogspb.ExportLogsServiceRequest{
+		ResourceLogs: []*logspb.ResourceLogs{
+			{
+				Resource: &resourcepb.Resource{
+					Attributes: []*commonpb.KeyValue{
+						{Key: "session.id", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "sess-http-meta"}}},
+						{Key: "service.version", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "1.0.32"}}},
+						{Key: "os.type", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "darwin"}}},
+						{Key: "os.version", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "24.1.0"}}},
+						{Key: "host.arch", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "arm64"}}},
+					},
+				},
+				ScopeLogs: []*logspb.ScopeLogs{
+					{
+						LogRecords: []*logspb.LogRecord{
+							{
+								TimeUnixNano: ts,
+								EventName:    "claude_code.api_request",
+								Attributes: []*commonpb.KeyValue{
+									{Key: "model", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "claude-sonnet-4-5-20250929"}}},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	body, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("failed to marshal request: %v", err)
+	}
+
+	url := fmt.Sprintf("http://%s/v1/logs", r.Addr().String())
+	resp, err := http.Post(url, "application/x-protobuf", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("HTTP POST failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	session := store.GetSession("sess-http-meta")
+	if session == nil {
+		t.Fatal("expected session sess-http-meta to exist")
+	}
+	if session.Metadata.ServiceVersion != "1.0.32" {
+		t.Errorf("expected ServiceVersion=1.0.32, got %q", session.Metadata.ServiceVersion)
+	}
+	if session.Metadata.OSType != "darwin" {
+		t.Errorf("expected OSType=darwin, got %q", session.Metadata.OSType)
+	}
+	if session.Metadata.OSVersion != "24.1.0" {
+		t.Errorf("expected OSVersion=24.1.0, got %q", session.Metadata.OSVersion)
+	}
+	if session.Metadata.HostArch != "arm64" {
+		t.Errorf("expected HostArch=arm64, got %q", session.Metadata.HostArch)
+	}
+	// session.id extraction should still work.
+	if session.SessionID != "sess-http-meta" {
+		t.Errorf("expected SessionID=sess-http-meta, got %q", session.SessionID)
+	}
+}
+
+func TestOTLPReceiver_HTTPMetrics(t *testing.T) {
+	t.Run("valid_protobuf_returns_200", func(t *testing.T) {
+		store := state.NewMemoryStore()
+		pm := newTestPortMapper()
+		r := startTestHTTP(t, store, pm)
+		defer r.Stop()
+
+		ts := uint64(time.Now().UnixNano())
+		req := &colmetricspb.ExportMetricsServiceRequest{
+			ResourceMetrics: []*metricspb.ResourceMetrics{
+				{
+					Resource: &resourcepb.Resource{
+						Attributes: []*commonpb.KeyValue{
+							{Key: "session.id", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "sess-http-metrics-001"}}},
+						},
+					},
+					ScopeMetrics: []*metricspb.ScopeMetrics{
+						{
+							Metrics: []*metricspb.Metric{
+								{
+									Name: "claude_code.cost.usage",
+									Data: &metricspb.Metric_Sum{
+										Sum: &metricspb.Sum{
+											DataPoints: []*metricspb.NumberDataPoint{
+												{
+													TimeUnixNano: ts,
+													Value:        &metricspb.NumberDataPoint_AsDouble{AsDouble: 0.25},
+													Attributes: []*commonpb.KeyValue{
+														{Key: "model", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "claude-sonnet-4-5-20250929"}}},
+													},
+												},
+											},
+											IsMonotonic: true,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		body, err := proto.Marshal(req)
+		if err != nil {
+			t.Fatalf("failed to marshal request: %v", err)
+		}
+
+		url := fmt.Sprintf("http://%s/v1/metrics", r.Addr().String())
+		resp, err := http.Post(url, "application/x-protobuf", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("HTTP POST failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("expected status 200, got %d", resp.StatusCode)
+		}
+
+		// Verify the metric was stored.
+		session := store.GetSession("sess-http-metrics-001")
+		if session == nil {
+			t.Fatal("expected session sess-http-metrics-001 to exist")
+		}
+		if session.TotalCost != 0.25 {
+			t.Errorf("expected TotalCost=0.25, got %f", session.TotalCost)
+		}
+		if len(session.Metrics) != 1 {
+			t.Errorf("expected 1 metric, got %d", len(session.Metrics))
+		}
+		if session.Metrics[0].Name != "claude_code.cost.usage" {
+			t.Errorf("expected metric name 'claude_code.cost.usage', got %q", session.Metrics[0].Name)
+		}
+	})
+
+	t.Run("GET_returns_405", func(t *testing.T) {
+		store := state.NewMemoryStore()
+		r := startTestHTTP(t, store, nil)
+		defer r.Stop()
+
+		url := fmt.Sprintf("http://%s/v1/metrics", r.Addr().String())
+		resp, err := http.Get(url)
+		if err != nil {
+			t.Fatalf("HTTP GET failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Errorf("expected status 405, got %d", resp.StatusCode)
+		}
+	})
+
+	t.Run("malformed_payload_returns_400", func(t *testing.T) {
+		store := state.NewMemoryStore()
+		r := startTestHTTP(t, store, nil)
+		defer r.Stop()
+
+		url := fmt.Sprintf("http://%s/v1/metrics", r.Addr().String())
+		resp, err := http.Post(url, "application/x-protobuf", bytes.NewReader([]byte("not valid protobuf")))
+		if err != nil {
+			t.Fatalf("HTTP POST failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("expected status 400, got %d", resp.StatusCode)
+		}
+	})
+
+	t.Run("metrics_appear_in_store", func(t *testing.T) {
+		store := state.NewMemoryStore()
+		r := startTestHTTP(t, store, nil)
+		defer r.Stop()
+
+		ts := uint64(time.Now().UnixNano())
+		req := &colmetricspb.ExportMetricsServiceRequest{
+			ResourceMetrics: []*metricspb.ResourceMetrics{
+				{
+					Resource: &resourcepb.Resource{
+						Attributes: []*commonpb.KeyValue{
+							{Key: "session.id", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "sess-http-metrics-store"}}},
+						},
+					},
+					ScopeMetrics: []*metricspb.ScopeMetrics{
+						{
+							Metrics: []*metricspb.Metric{
+								{
+									Name: "claude_code.token.usage",
+									Data: &metricspb.Metric_Sum{
+										Sum: &metricspb.Sum{
+											DataPoints: []*metricspb.NumberDataPoint{
+												{
+													TimeUnixNano: ts,
+													Value:        &metricspb.NumberDataPoint_AsInt{AsInt: 5000},
+												},
+											},
+											IsMonotonic: true,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		body, err := proto.Marshal(req)
+		if err != nil {
+			t.Fatalf("failed to marshal request: %v", err)
+		}
+
+		url := fmt.Sprintf("http://%s/v1/metrics", r.Addr().String())
+		resp, err := http.Post(url, "application/x-protobuf", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("HTTP POST failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("expected status 200, got %d", resp.StatusCode)
+		}
+
+		session := store.GetSession("sess-http-metrics-store")
+		if session == nil {
+			t.Fatal("expected session to exist after metric ingestion")
+		}
+		if session.TotalTokens != 5000 {
+			t.Errorf("expected TotalTokens=5000, got %d", session.TotalTokens)
 		}
 	})
 }

@@ -3,6 +3,7 @@
 package events
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -26,6 +27,14 @@ func FormatEvent(sessionID string, e state.Event) FormattedEvent {
 	}
 	if fe.Timestamp.IsZero() {
 		fe.Timestamp = time.Now()
+	}
+
+	// Deep copy raw attributes.
+	if len(e.Attributes) > 0 {
+		fe.RawAttributes = make(map[string]string, len(e.Attributes))
+		for k, v := range e.Attributes {
+			fe.RawAttributes[k] = v
+		}
 	}
 
 	shortSession := shortID(sessionID)
@@ -69,6 +78,19 @@ func formatToolResult(session string, e state.Event, fe *FormattedEvent) string 
 	successStr := attrStr(e, "success")
 	durationMS := attrStr(e, "duration_ms")
 	decision := attrStr(e, "decision")
+
+	// Check for MCP tool details in tool_parameters JSON.
+	toolParams := attrStr(e, "tool_parameters")
+	if toolParams != "" {
+		var params map[string]any
+		if err := json.Unmarshal([]byte(toolParams), &params); err == nil {
+			if mcpServer, ok := params["mcp_server_name"].(string); ok && mcpServer != "" {
+				if mcpTool, ok := params["mcp_tool_name"].(string); ok && mcpTool != "" {
+					toolName = fmt.Sprintf("%s:%s", mcpServer, mcpTool)
+				}
+			}
+		}
+	}
 
 	success := strings.EqualFold(successStr, "true")
 	successPtr := success

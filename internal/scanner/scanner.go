@@ -40,6 +40,10 @@ type ProcessAPI interface {
 
 	// GetOpenPorts returns local/remote port pairs for TCP sockets owned by pid.
 	GetOpenPorts(pid int) ([][2]int, error)
+
+	// PgrepClaude uses pgrep as a fallback to find Claude Code PIDs when
+	// libproc-based detection fails (e.g. macOS privacy restrictions).
+	PgrepClaude() []int
 }
 
 // Scanner discovers and tracks Claude Code processes.
@@ -133,7 +137,7 @@ func (s *Scanner) Scan() []ProcessInfo {
 	// This handles cases where macOS privacy restrictions prevent libproc from
 	// reading process info for certain PIDs.
 	if len(discovered) == 0 {
-		fallbackPIDs := pgrepClaude()
+		fallbackPIDs := s.api.PgrepClaude()
 		for _, pid := range fallbackPIDs {
 			if _, exists := discovered[pid]; exists {
 				continue
@@ -421,6 +425,8 @@ func readSettingsEnv(path string) map[string]string {
 
 // pgrepClaude uses pgrep to find Claude Code CLI process PIDs as a fallback
 // when libproc-based detection fails (e.g., macOS privacy restrictions).
+// This is the default implementation used by darwinProcessAPI; tests can
+// provide their own via the ProcessAPI interface.
 func pgrepClaude() []int {
 	out, err := exec.Command("pgrep", "-x", "claude").Output()
 	if err != nil {

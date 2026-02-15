@@ -41,6 +41,7 @@ func (m Model) renderStats() string {
 		m.renderCodeSection(ds),
 		m.renderToolsSection(ds),
 		m.renderAPISection(ds),
+		m.renderTokenBreakdownSection(ds),
 		m.renderModelBreakdown(ds),
 		m.renderTopTools(ds),
 	}
@@ -127,6 +128,22 @@ func (m Model) renderAPISection(ds stats.DashboardStats) string {
 		fmt.Sprintf("  Avg API latency:  %.1fs", ds.AvgAPILatency),
 		fmt.Sprintf("  Error rate:       %s %.1f%%",
 			renderProgressBar(ds.ErrorRate, 20), ds.ErrorRate*100),
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderTokenBreakdownSection renders the token type breakdown.
+func (m Model) renderTokenBreakdownSection(ds stats.DashboardStats) string {
+	title := panelTitleStyle.Render("Token Breakdown")
+	if len(ds.TokenBreakdown) == 0 {
+		return title + "\n" + dimStyle.Render("  No token data")
+	}
+	lines := []string{
+		title,
+		fmt.Sprintf("  Input:          %s", formatNumber(ds.TokenBreakdown["input"])),
+		fmt.Sprintf("  Output:         %s", formatNumber(ds.TokenBreakdown["output"])),
+		fmt.Sprintf("  Cache Read:     %s", formatNumber(ds.TokenBreakdown["cacheRead"])),
+		fmt.Sprintf("  Cache Creation: %s", formatNumber(ds.TokenBreakdown["cacheCreation"])),
 	}
 	return strings.Join(lines, "\n")
 }

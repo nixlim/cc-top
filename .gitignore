@@ -1,0 +1,29 @@
+# Binaries
+cc-top
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Go build/coverage
+/bin/
+/dist/
+cover.out
+cover.html
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tasks (local)
+.tasks/

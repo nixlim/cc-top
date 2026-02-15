@@ -26,6 +26,7 @@ import (
 
 func main() {
 	setupFlag := flag.Bool("setup", false, "Configure Claude Code telemetry settings and exit")
+	debugFlag := flag.String("debug", "", "Write OTEL debug log (JSONL) to the specified file path")
 	flag.Parse()
 
 	// Handle --setup: run non-interactive settings merge and exit.
@@ -57,8 +58,20 @@ func main() {
 	portMapper := correlator.NewScannerPortMapper(proc.API())
 	corr := correlator.NewCorrelator(portMapper, cfg.Receiver.GRPCPort)
 
+	// Set up OTEL debug logging if --debug flag is provided.
+	var recvOpts []receiver.ReceiverOption
+	if *debugFlag != "" {
+		debugFile, err := os.OpenFile(*debugFlag, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cc-top: failed to open debug log %q: %v\n", *debugFlag, err)
+			os.Exit(1)
+		}
+		defer debugFile.Close()
+		recvOpts = append(recvOpts, receiver.WithLogger(receiver.NewFileLogger(debugFile)))
+	}
+
 	// Create the OTLP receiver (gRPC + HTTP).
-	recv := receiver.New(cfg.Receiver, store, &portMapperAdapter{corr: corr})
+	recv := receiver.New(cfg.Receiver, store, &portMapperAdapter{corr: corr}, recvOpts...)
 
 	// Create the event buffer and formatter bridge.
 	eventBuf := events.NewRingBuffer(cfg.Display.EventBufferSize)

@@ -239,11 +239,13 @@ func (ms *MemoryStore) AddEvent(sessionID string, e Event) {
 		s.LastEventAt = time.Now()
 	}
 
-	// Extract model and cache tokens from api_request events.
+	// Track model from any event that carries it (api_request, api_error, etc.).
+	if model, ok := e.Attributes["model"]; ok && model != "" {
+		s.Model = model
+	}
+
+	// Extract cache tokens from api_request events.
 	if e.Name == "claude_code.api_request" {
-		if model, ok := e.Attributes["model"]; ok && model != "" {
-			s.Model = model
-		}
 		if v, ok := e.Attributes["cache_read_tokens"]; ok {
 			if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 				s.CacheReadTokens += n

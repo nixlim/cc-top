@@ -28,16 +28,18 @@ type HTTPReceiver struct {
 	cfg        config.ReceiverConfig
 	store      state.Store
 	portMapper PortMapper
+	logger     Logger
 	server     *http.Server
 	listener   net.Listener
 }
 
 // NewHTTPReceiver creates a new HTTP-based OTLP log/event receiver.
-func NewHTTPReceiver(cfg config.ReceiverConfig, store state.Store, portMapper PortMapper) *HTTPReceiver {
+func NewHTTPReceiver(cfg config.ReceiverConfig, store state.Store, portMapper PortMapper, logger Logger) *HTTPReceiver {
 	return &HTTPReceiver{
 		cfg:        cfg,
 		store:      store,
 		portMapper: portMapper,
+		logger:     logger,
 	}
 }
 
@@ -116,7 +118,7 @@ func (r *HTTPReceiver) handleLogs(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	processLogExport(r.store, r.portMapper, exportReq, sourcePort)
+	processLogExport(r.store, r.portMapper, exportReq, sourcePort, r.logger)
 
 	// Return success response.
 	w.Header().Set("Content-Type", "application/json")
@@ -178,7 +180,7 @@ func (r *HTTPReceiver) handleMetrics(w http.ResponseWriter, req *http.Request) {
 	for _, rm := range exportReq.GetResourceMetrics() {
 		resource := rm.GetResource()
 		for _, sm := range rm.GetScopeMetrics() {
-			extractMetrics(r.store, resource, sm.GetMetrics(), sourcePort, r.portMapper)
+			extractMetrics(r.store, resource, sm.GetMetrics(), sourcePort, r.portMapper, r.logger)
 		}
 	}
 

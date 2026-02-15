@@ -459,8 +459,8 @@ func TestStateStore_OrgAndUserFromEvent(t *testing.T) {
 	store.AddEvent("sess-id", Event{
 		Name: "claude_code.api_request",
 		Attributes: map[string]string{
-			"organization.id":    "org-123",
-			"user.account_uuid":  "user-abc",
+			"organization.id":   "org-123",
+			"user.account_uuid": "user-abc",
 		},
 		Timestamp: time.Now(),
 	})
@@ -481,8 +481,8 @@ func TestStateStore_OrgAndUserFromMetric(t *testing.T) {
 		Name:  "claude_code.token.usage",
 		Value: 100,
 		Attributes: map[string]string{
-			"organization.id":    "org-456",
-			"user.account_uuid":  "user-def",
+			"organization.id":   "org-456",
+			"user.account_uuid": "user-def",
 		},
 		Timestamp: time.Now(),
 	})
@@ -795,6 +795,71 @@ func TestStateStore_CacheTokenMalformed(t *testing.T) {
 	}
 }
 
+func TestStateStore_ModelFromAPIError(t *testing.T) {
+	store := NewMemoryStore()
+
+	// An api_error event with a model attribute should set the session model.
+	store.AddEvent("sess-err", Event{
+		Name: "claude_code.api_error",
+		Attributes: map[string]string{
+			"model":       "claude-opus-4-6",
+			"status_code": "529",
+			"error":       "overloaded",
+		},
+		Timestamp: time.Now(),
+	})
+
+	s := store.GetSession("sess-err")
+	if s == nil {
+		t.Fatal("expected session to exist")
+	}
+	if s.Model != "claude-opus-4-6" {
+		t.Errorf("expected Model=claude-opus-4-6, got %q", s.Model)
+	}
+}
+
+func TestStateStore_ModelFromAnyEvent(t *testing.T) {
+	store := NewMemoryStore()
+
+	// Even non-api events should set the model if the attribute is present.
+	store.AddEvent("sess-other", Event{
+		Name: "claude_code.tool_decision",
+		Attributes: map[string]string{
+			"model":     "claude-haiku-4-5-20251001",
+			"tool_name": "Read",
+			"decision":  "accept",
+		},
+		Timestamp: time.Now(),
+	})
+
+	s := store.GetSession("sess-other")
+	if s == nil {
+		t.Fatal("expected session to exist")
+	}
+	if s.Model != "claude-haiku-4-5-20251001" {
+		t.Errorf("expected Model=claude-haiku-4-5-20251001, got %q", s.Model)
+	}
+}
+
+func TestStateStore_ModelNotSetWithoutAttribute(t *testing.T) {
+	store := NewMemoryStore()
+
+	// Events without a model attribute should NOT change the model.
+	store.AddEvent("sess-nomodel", Event{
+		Name:       "claude_code.user_prompt",
+		Attributes: map[string]string{"prompt_length": "42"},
+		Timestamp:  time.Now(),
+	})
+
+	s := store.GetSession("sess-nomodel")
+	if s == nil {
+		t.Fatal("expected session to exist")
+	}
+	if s.Model != "" {
+		t.Errorf("expected Model to be empty, got %q", s.Model)
+	}
+}
+
 func TestSessionStatus(t *testing.T) {
 	now := time.Now()
 
@@ -858,10 +923,10 @@ func TestSessionHelpers(t *testing.T) {
 
 	t.Run("FilterSessionsByStatus", func(t *testing.T) {
 		sessions := []SessionData{
-			{SessionID: "s1", LastEventAt: time.Now()},                             // active
-			{SessionID: "s2", LastEventAt: time.Now().Add(-2 * time.Minute)},       // idle
-			{SessionID: "s3", LastEventAt: time.Now().Add(-10 * time.Minute)},      // done
-			{SessionID: "s4", Exited: true, LastEventAt: time.Now()},               // exited
+			{SessionID: "s1", LastEventAt: time.Now()},                        // active
+			{SessionID: "s2", LastEventAt: time.Now().Add(-2 * time.Minute)},  // idle
+			{SessionID: "s3", LastEventAt: time.Now().Add(-10 * time.Minute)}, // done
+			{SessionID: "s4", Exited: true, LastEventAt: time.Now()},          // exited
 		}
 
 		active := FilterSessionsByStatus(sessions, StatusActive)

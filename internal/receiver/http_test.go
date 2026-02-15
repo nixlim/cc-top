@@ -30,7 +30,7 @@ func startTestHTTP(t *testing.T, store state.Store, pm PortMapper) *HTTPReceiver
 		Bind:     "127.0.0.1",
 	}
 
-	r := NewHTTPReceiver(cfg, store, pm)
+	r := NewHTTPReceiver(cfg, store, pm, NopLogger{})
 
 	// Manually bind to an ephemeral port.
 	lis, err := net.Listen("tcp", "127.0.0.1:0")

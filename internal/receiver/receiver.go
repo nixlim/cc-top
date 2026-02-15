@@ -32,18 +32,36 @@ type PortMapper interface {
 
 // Receiver manages both gRPC and HTTP OTLP receivers.
 type Receiver struct {
-	grpc *GRPCReceiver
-	http *HTTPReceiver
+	grpc   *GRPCReceiver
+	http   *HTTPReceiver
+	logger Logger
+}
+
+// ReceiverOption configures the Receiver.
+type ReceiverOption func(*Receiver)
+
+// WithLogger sets the debug logger for the receiver. When set, all incoming
+// OTEL events and metrics are logged in structured JSON format. The default
+// is NopLogger (no output, zero overhead).
+func WithLogger(l Logger) ReceiverOption {
+	return func(r *Receiver) {
+		r.logger = l
+	}
 }
 
 // New creates a new Receiver with gRPC and HTTP endpoints configured from cfg.
 // The store is used to persist received metrics and events.
 // portMapper may be nil if port correlation is not needed.
-func New(cfg config.ReceiverConfig, store state.Store, portMapper PortMapper) *Receiver {
-	return &Receiver{
-		grpc: NewGRPCReceiver(cfg, store, portMapper),
-		http: NewHTTPReceiver(cfg, store, portMapper),
+func New(cfg config.ReceiverConfig, store state.Store, portMapper PortMapper, opts ...ReceiverOption) *Receiver {
+	r := &Receiver{
+		logger: NopLogger{},
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	r.grpc = NewGRPCReceiver(cfg, store, portMapper, r.logger)
+	r.http = NewHTTPReceiver(cfg, store, portMapper, r.logger)
+	return r
 }
 
 // Start begins listening on both gRPC and HTTP endpoints.
@@ -139,7 +157,7 @@ func extractResourceMetadata(resource *resourcepb.Resource) state.SessionMetadat
 
 // extractMetrics converts OTLP metric data points into state.Metric values
 // and stores them in the state store, keyed by session ID.
-func extractMetrics(store state.Store, resource *resourcepb.Resource, metrics []*metricspb.Metric, sourcePort int, portMapper PortMapper) {
+func extractMetrics(store state.Store, resource *resourcepb.Resource, metrics []*metricspb.Metric, sourcePort int, portMapper PortMapper, logger Logger) {
 	meta := extractResourceMetadata(resource)
 
 	for _, m := range metrics {
@@ -189,6 +207,7 @@ func extractMetrics(store state.Store, resource *resourcepb.Resource, metrics []
 			}
 
 			store.AddMetric(sessionID, sm)
+			logger.LogMetric(sessionID, sm)
 
 			// Update session metadata from resource attributes.
 			if sessionID != "" {
@@ -216,7 +235,7 @@ func sourcePortFromAddr(addr net.Addr) int {
 
 // processLogExport extracts events from an OTLP log export request and stores them.
 // This is a shared function used by both gRPC and HTTP log receivers.
-func processLogExport(store state.Store, portMapper PortMapper, req *collogspb.ExportLogsServiceRequest, sourcePort int) {
+func processLogExport(store state.Store, portMapper PortMapper, req *collogspb.ExportLogsServiceRequest, sourcePort int, logger Logger) {
 	for _, rl := range req.GetResourceLogs() {
 		resource := rl.GetResource()
 		meta := extractResourceMetadata(resource)
@@ -252,6 +271,7 @@ func processLogExport(store state.Store, portMapper PortMapper, req *collogspb.E
 				}
 
 				store.AddEvent(sessionID, evt)
+				logger.LogEvent(sessionID, evt)
 
 				// Update session metadata from resource attributes.
 				if sessionID != "" {

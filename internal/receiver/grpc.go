@@ -27,6 +27,7 @@ type GRPCReceiver struct {
 	cfg        config.ReceiverConfig
 	store      state.Store
 	portMapper PortMapper
+	logger     Logger
 	server     *grpc.Server
 	listener   net.Listener
 }
@@ -39,14 +40,16 @@ type grpcLogsHandler struct {
 
 	store      state.Store
 	portMapper PortMapper
+	logger     Logger
 }
 
 // NewGRPCReceiver creates a new gRPC-based OTLP metrics receiver.
-func NewGRPCReceiver(cfg config.ReceiverConfig, store state.Store, portMapper PortMapper) *GRPCReceiver {
+func NewGRPCReceiver(cfg config.ReceiverConfig, store state.Store, portMapper PortMapper, logger Logger) *GRPCReceiver {
 	return &GRPCReceiver{
 		cfg:        cfg,
 		store:      store,
 		portMapper: portMapper,
+		logger:     logger,
 	}
 }
 
@@ -66,6 +69,7 @@ func (r *GRPCReceiver) Start(ctx context.Context) error {
 	collogspb.RegisterLogsServiceServer(r.server, &grpcLogsHandler{
 		store:      r.store,
 		portMapper: r.portMapper,
+		logger:     r.logger,
 	})
 
 	log.Printf("OTLP gRPC receiver listening on %s", addr)
@@ -107,7 +111,7 @@ func (r *GRPCReceiver) Export(ctx context.Context, req *colmetricspb.ExportMetri
 		resource := rm.GetResource()
 
 		for _, sm := range rm.GetScopeMetrics() {
-			extractMetrics(r.store, resource, sm.GetMetrics(), sourcePort, r.portMapper)
+			extractMetrics(r.store, resource, sm.GetMetrics(), sourcePort, r.portMapper, r.logger)
 		}
 	}
 
@@ -128,7 +132,7 @@ func (h *grpcLogsHandler) Export(ctx context.Context, req *collogspb.ExportLogsS
 		sourcePort = sourcePortFromAddr(p.Addr)
 	}
 
-	processLogExport(h.store, h.portMapper, req, sourcePort)
+	processLogExport(h.store, h.portMapper, req, sourcePort, h.logger)
 
 	return &collogspb.ExportLogsServiceResponse{}, nil
 }

@@ -49,7 +49,7 @@ func startTestGRPC(t *testing.T, store state.Store, pm PortMapper) (*GRPCReceive
 		Bind:     "127.0.0.1",
 	}
 
-	r := NewGRPCReceiver(cfg, store, pm)
+	r := NewGRPCReceiver(cfg, store, pm, NopLogger{})
 
 	// Manually bind to an ephemeral port.
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -63,6 +63,7 @@ func startTestGRPC(t *testing.T, store state.Store, pm PortMapper) (*GRPCReceive
 	collogspb.RegisterLogsServiceServer(r.server, &grpcLogsHandler{
 		store:      r.store,
 		portMapper: r.portMapper,
+		logger:     NopLogger{},
 	})
 
 	go func() {
@@ -582,7 +583,7 @@ func TestOTLPReceiver_PortConflict(t *testing.T) {
 		Bind:     "127.0.0.1",
 	}
 
-	r := NewGRPCReceiver(cfg, store, nil)
+	r := NewGRPCReceiver(cfg, store, nil, NopLogger{})
 	err = r.Start(context.Background())
 	if err == nil {
 		r.Stop()

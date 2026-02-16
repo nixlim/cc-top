@@ -1,6 +1,6 @@
 # cc-top
 
-![cc-top demo](start_up_vid.gif)
+![cc-top demo](cc-top-demo-1502262351.gif)
 
 A terminal dashboard for monitoring [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions in real time. Think `htop`, but for your AI coding assistant.
 

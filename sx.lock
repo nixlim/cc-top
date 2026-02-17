@@ -1,0 +1,13 @@
+lock-version = "1.0"
+version = "1"
+created-by = "skills/0.11.0"
+
+[[assets]]
+  name = "project"
+  version = "1"
+  type = "rule"
+  [assets.source-path]
+    path = "./assets/project/1"
+
+  [[assets.scopes]]
+    repo = "git@github.com:nixlim/cc-top.git"

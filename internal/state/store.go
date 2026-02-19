@@ -260,6 +260,9 @@ func (ms *MemoryStore) ListSessions() []SessionData {
 	}
 
 	sort.Slice(result, func(i, j int) bool {
+		if result[i].StartedAt.Equal(result[j].StartedAt) {
+			return result[i].SessionID < result[j].SessionID
+		}
 		return result[i].StartedAt.Before(result[j].StartedAt)
 	})
 	return result

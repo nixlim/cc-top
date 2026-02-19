@@ -1,9 +1,3 @@
-// Package tui implements the Bubble Tea TUI for cc-top.
-//
-// The TUI has three top-level views: Startup, Dashboard, and Stats.
-// The Dashboard view arranges four panels: Session List (left),
-// Burn Rate (top right), Event Stream (center right), and Alerts (bottom).
-// The Stats view is a full-screen display of aggregate statistics.
 package tui
 
 import (
@@ -22,91 +16,73 @@ import (
 	"github.com/nixlim/cc-top/internal/stats"
 )
 
-// ViewState represents which top-level view is active.
 type ViewState int
 
 const (
-	// ViewStartup shows the startup screen with process discovery.
 	ViewStartup ViewState = iota
-	// ViewDashboard shows the main dashboard with four panels.
 	ViewDashboard
-	// ViewStats shows the full-screen stats dashboard.
 	ViewStats
+	ViewHistory
 )
 
-// PanelFocus represents which dashboard panel currently has keyboard focus.
 type PanelFocus int
 
 const (
-	// FocusSessions is the default focus on the session list panel.
 	FocusSessions PanelFocus = iota
-	// FocusEvents gives focus to the event stream panel.
 	FocusEvents
-	// FocusAlerts gives focus to the alerts panel.
 	FocusAlerts
 )
 
-// tickMsg is sent periodically to trigger TUI refresh.
 type tickMsg time.Time
 
-// StateProvider is the interface for reading application state.
-// This decouples the TUI from the concrete state store implementation.
 type StateProvider interface {
 	GetSession(sessionID string) *state.SessionData
 	ListSessions() []state.SessionData
 	GetAggregatedCost() float64
+	QueryDailySummaries(days int) []state.DailySummary
+	DroppedWrites() int64
 }
 
-// BurnRateProvider is the interface for reading burn rate data.
 type BurnRateProvider interface {
 	Get(sessionID string) burnrate.BurnRate
 	GetGlobal() burnrate.BurnRate
 }
 
-// EventProvider is the interface for reading formatted events.
 type EventProvider interface {
 	Recent(limit int) []events.FormattedEvent
 	RecentForSession(sessionID string, limit int) []events.FormattedEvent
 }
 
-// AlertProvider is the interface for reading active alerts.
 type AlertProvider interface {
 	Active() []alerts.Alert
 	ActiveForSession(sessionID string) []alerts.Alert
 }
 
-// StatsProvider is the interface for reading dashboard statistics.
 type StatsProvider interface {
 	Get(sessionID string) stats.DashboardStats
 	GetGlobal() stats.DashboardStats
 }
 
-// ScannerProvider is the interface for reading process scan results.
 type ScannerProvider interface {
 	Processes() []scanner.ProcessInfo
 	GetTelemetryStatus(p scanner.ProcessInfo) scanner.StatusInfo
 	Rescan()
 }
 
-// SettingsWriter is the interface for writing Claude Code settings.
 type SettingsWriter interface {
 	EnableTelemetry() error
 	FixMisconfigured() error
 }
 
-// Model is the top-level Bubble Tea model for cc-top.
 type Model struct {
-	// View state.
 	view     ViewState
 	width    int
 	height   int
 	keys     KeyMap
 	quitting bool
 
-	// Configuration.
 	cfg config.Config
 
-	// Providers (dependency-injected, may be nil during tests).
 	state    StateProvider
 	burnRate BurnRateProvider
 	events   EventProvider
@@ -115,59 +91,54 @@ type Model struct {
 	scanner  ScannerProvider
 	settings SettingsWriter
 
-	// Session selection.
-	selectedSession string // empty = global view
-	sessionCursor   int    // cursor position in session list
+	selectedSession string
+	sessionCursor   int
 
-	// Event stream state.
 	eventScrollPos int
 	autoScroll     bool
 	eventFilter    EventFilter
 	filterMenu     FilterMenuState
 
-	// Startup screen state.
 	startupMessage string
 
-	// Kill switch state.
 	killConfirm    bool
 	killTargetPID  int
 	killTargetInfo string
 
-	// Cached burn rate (updated on tick, not on every render).
 	cachedBurnRate burnrate.BurnRate
 
-	// Alert scroll state.
 	alertScrollPos int
-	alertCursor    int // cursor position within visible alerts
+	alertCursor    int
 
-	// Panel focus and detail overlay.
 	panelFocus      PanelFocus
-	eventCursor     int    // cursor position within visible events
-	detailOverlay   bool   // whether the detail overlay is shown
-	detailContent   string // full text to display in the overlay
-	detailTitle     string // title for the detail overlay
-	detailScrollPos int    // scroll position within the detail overlay
+	eventCursor     int
+	detailOverlay   bool
+	detailContent   string
+	detailTitle     string
+	detailScrollPos int
 
-	// Stats view scroll.
 	statsScrollPos int
 
-	// Refresh rate.
+	isPersistent bool
+
+	historyGranularity string
+	historyScrollPos   int
+
 	refreshRate time.Duration
 
-	// Shutdown callback, if set.
 	onShutdown func()
 }
 
-// NewModel creates a new TUI model with the given configuration and providers.
 func NewModel(cfg config.Config, opts ...ModelOption) Model {
 	m := Model{
-		view:        ViewStartup,
-		keys:        DefaultKeyMap(),
-		cfg:         cfg,
-		autoScroll:  true,
-		eventFilter: NewEventFilter(),
-		filterMenu:  NewFilterMenu(),
-		refreshRate: time.Duration(cfg.Display.RefreshRateMS) * time.Millisecond,
+		view:               ViewStartup,
+		keys:               DefaultKeyMap(),
+		cfg:                cfg,
+		autoScroll:         true,
+		eventFilter:        NewEventFilter(),
+		filterMenu:         NewFilterMenu(),
+		historyGranularity: "daily",
+		refreshRate:        time.Duration(cfg.Display.RefreshRateMS) * time.Millisecond,
 	}
 
 	for _, opt := range opts {
@@ -177,69 +148,60 @@ func NewModel(cfg config.Config, opts ...ModelOption) Model {
 	return m
 }
 
-// ModelOption is a functional option for configuring the Model.
 type ModelOption func(*Model)
 
-// WithStateProvider sets the state provider.
 func WithStateProvider(s StateProvider) ModelOption {
 	return func(m *Model) { m.state = s }
 }
 
-// WithBurnRateProvider sets the burn rate provider.
 func WithBurnRateProvider(b BurnRateProvider) ModelOption {
 	return func(m *Model) { m.burnRate = b }
 }
 
-// WithEventProvider sets the event provider.
 func WithEventProvider(e EventProvider) ModelOption {
 	return func(m *Model) { m.events = e }
 }
 
-// WithAlertProvider sets the alert provider.
 func WithAlertProvider(a AlertProvider) ModelOption {
 	return func(m *Model) { m.alerts = a }
 }
 
-// WithStatsProvider sets the stats provider.
 func WithStatsProvider(s StatsProvider) ModelOption {
 	return func(m *Model) { m.stats = s }
 }
 
-// WithScannerProvider sets the scanner provider.
 func WithScannerProvider(s ScannerProvider) ModelOption {
 	return func(m *Model) { m.scanner = s }
 }
 
-// WithSettingsWriter sets the settings writer.
 func WithSettingsWriter(s SettingsWriter) ModelOption {
 	return func(m *Model) { m.settings = s }
 }
 
-// WithStartView sets the initial view state.
 func WithStartView(v ViewState) ModelOption {
 	return func(m *Model) { m.view = v }
 }
 
-// WithOnShutdown sets a callback to invoke during graceful shutdown.
 func WithOnShutdown(fn func()) ModelOption {
 	return func(m *Model) { m.onShutdown = fn }
 }
 
-// Init returns the initial command for the Bubble Tea program.
+func WithPersistenceFlag(isPersistent bool) ModelOption {
+	return func(m *Model) { m.isPersistent = isPersistent }
+}
+
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.tickCmd(),
 	)
 }
 
-// tickCmd returns a command that sends a tickMsg after the refresh interval.
 func (m Model) tickCmd() tea.Cmd {
 	return tea.Tick(m.refreshRate, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }
 
-// Update handles all incoming messages and updates the model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -248,7 +210,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		// Refresh cached burn rate on tick (not on every render).
 		m.cachedBurnRate = m.computeBurnRate()
 		return m, m.tickCmd()
 
@@ -259,24 +220,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleKey routes key presses to the appropriate handler based on current view.
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Kill confirmation dialog takes priority.
 	if m.killConfirm {
 		return m.handleKillConfirmKey(msg)
 	}
 
-	// Detail overlay takes priority when active.
 	if m.detailOverlay {
 		return m.handleDetailOverlayKey(msg)
 	}
 
-	// Filter menu takes priority when active.
 	if m.filterMenu.Active {
 		return m.handleFilterMenuKey(msg)
 	}
 
-	// Global key bindings (available in all views).
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		m.quitting = true
@@ -291,7 +247,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// View-specific key handling.
 	switch m.view {
 	case ViewStartup:
 		return m.handleStartupKey(msg)
@@ -299,12 +254,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleDashboardKey(msg)
 	case ViewStats:
 		return m.handleStatsKey(msg)
+	case ViewHistory:
+		return m.handleHistoryKey(msg)
 	}
 
 	return m, nil
 }
 
-// handleStartupKey handles keys on the startup screen.
 func (m Model) handleStartupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Enter):
@@ -342,10 +298,7 @@ func (m Model) handleStartupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleDashboardKey handles keys on the main dashboard.
-// It routes to panel-specific handlers based on the current panel focus.
 func (m Model) handleDashboardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Global dashboard keys (always available regardless of focus).
 	switch {
 	case key.Matches(msg, m.keys.Tab):
 		m.panelFocus = FocusSessions
@@ -368,7 +321,6 @@ func (m Model) handleDashboardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.panelFocus != FocusEvents {
 			m.panelFocus = FocusEvents
 			m.autoScroll = false
-			// Set cursor to last visible event.
 			evts := m.getFilteredEvents(m.cfg.Display.EventBufferSize)
 			if len(evts) > 0 {
 				m.eventCursor = len(evts) - 1
@@ -377,7 +329,6 @@ func (m Model) handleDashboardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Panel-specific key handling.
 	switch m.panelFocus {
 	case FocusEvents:
 		return m.handleEventsPanelKey(msg)
@@ -388,7 +339,6 @@ func (m Model) handleDashboardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-// handleSessionsPanelKey handles keys when the session list panel has focus.
 func (m Model) handleSessionsPanelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Up):
@@ -433,7 +383,6 @@ func (m Model) handleSessionsPanelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleEventsPanelKey handles keys when the event stream panel has focus.
 func (m Model) handleEventsPanelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	evts := m.getFilteredEvents(m.cfg.Display.EventBufferSize)
 
@@ -469,7 +418,6 @@ func (m Model) handleEventsPanelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleAlertsPanelKey handles keys when the alerts panel has focus.
 func (m Model) handleAlertsPanelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	activeAlerts := m.getActiveAlerts()
 
@@ -504,7 +452,6 @@ func (m Model) handleAlertsPanelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleDetailOverlayKey handles keys when the detail overlay is active.
 func (m Model) handleDetailOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Escape), key.Matches(msg, m.keys.Enter):
@@ -528,7 +475,6 @@ func (m Model) handleDetailOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// formatEventDetail builds the full detail content for an event.
 func (m Model) formatEventDetail(e events.FormattedEvent) string {
 	var lines []string
 	lines = append(lines, "Type:      "+e.EventType)
@@ -547,7 +493,6 @@ func (m Model) formatEventDetail(e events.FormattedEvent) string {
 	return strings.Join(lines, "\n")
 }
 
-// formatAlertDetail builds the full detail content for an alert.
 func (m Model) formatAlertDetail(a alerts.Alert) string {
 	var lines []string
 	lines = append(lines, "Rule:      "+a.Rule)
@@ -564,11 +509,10 @@ func (m Model) formatAlertDetail(a alerts.Alert) string {
 	return strings.Join(lines, "\n")
 }
 
-// handleStatsKey handles keys on the stats dashboard.
 func (m Model) handleStatsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Tab):
-		m.view = ViewDashboard
+		m.view = ViewHistory
 		return m, nil
 	case key.Matches(msg, m.keys.Up):
 		if m.statsScrollPos > 0 {
@@ -582,7 +526,41 @@ func (m Model) handleStatsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleFilterMenuKey handles keys in the filter menu overlay.
+func (m Model) handleHistoryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.Tab):
+		m.view = ViewDashboard
+		return m, nil
+	case key.Matches(msg, m.keys.Up):
+		if m.historyScrollPos > 0 {
+			m.historyScrollPos--
+		}
+		return m, nil
+	case key.Matches(msg, m.keys.Down):
+		m.historyScrollPos++
+		return m, nil
+	}
+
+	if msg.Type == tea.KeyRunes && len(msg.Runes) == 1 {
+		switch msg.Runes[0] {
+		case 'd':
+			m.historyGranularity = "daily"
+			m.historyScrollPos = 0
+			return m, nil
+		case 'w':
+			m.historyGranularity = "weekly"
+			m.historyScrollPos = 0
+			return m, nil
+		case 'm':
+			m.historyGranularity = "monthly"
+			m.historyScrollPos = 0
+			return m, nil
+		}
+	}
+
+	return m, nil
+}
+
 func (m Model) handleFilterMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Escape):
@@ -612,7 +590,6 @@ func (m Model) handleFilterMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// applyFilter updates the event filter from the filter menu state.
 func (m *Model) applyFilter() {
 	m.eventFilter.EventTypes = make(map[string]bool)
 	m.eventFilter.SuccessOnly = false
@@ -630,7 +607,6 @@ func (m *Model) applyFilter() {
 	}
 }
 
-// getSessions returns the current session list from the state provider.
 func (m Model) getSessions() []state.SessionData {
 	if m.state == nil {
 		return nil
@@ -638,7 +614,20 @@ func (m Model) getSessions() []state.SessionData {
 	return m.state.ListSessions()
 }
 
-// View renders the TUI based on the current view state.
+func (m Model) headerIndicators() string {
+	var parts []string
+	if !m.isPersistent {
+		parts = append(parts, "[No persistence]")
+	}
+	if m.state != nil && m.state.DroppedWrites() > 0 {
+		parts = append(parts, "[!] Writes dropped")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " " + dimStyle.Render(strings.Join(parts, " "))
+}
+
 func (m Model) View() string {
 	if m.quitting {
 		return "Shutting down...\n"
@@ -652,9 +641,10 @@ func (m Model) View() string {
 		output = m.renderDashboard()
 	case ViewStats:
 		output = m.renderStats()
+	case ViewHistory:
+		output = m.renderHistory()
 	}
 
-	// Clamp output to terminal height so the header is never pushed off-screen.
 	if m.height > 0 {
 		lines := strings.Split(output, "\n")
 		if len(lines) > m.height {

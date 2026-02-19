@@ -7,7 +7,6 @@ import (
 )
 
 func TestConfigParser_Defaults(t *testing.T) {
-	// Loading from a non-existent file should return all defaults, no error.
 	result, err := LoadFrom("/nonexistent/path/config.toml")
 	if err != nil {
 		t.Fatalf("expected no error for missing config file, got: %v", err)
@@ -76,7 +75,6 @@ func TestConfigParser_Defaults(t *testing.T) {
 		t.Errorf("default cost_color_yellow_below: want 2.00, got %f", cfg.Display.CostColorYellowBelow)
 	}
 
-	// Check default model context limits.
 	if len(cfg.Models) != 3 {
 		t.Errorf("default models: want 3 entries, got %d", len(cfg.Models))
 	}
@@ -115,7 +113,6 @@ bind = "0.0.0.0"
 		t.Errorf("bind: want 0.0.0.0, got %s", cfg.Receiver.Bind)
 	}
 
-	// Verify other defaults are preserved.
 	if cfg.Scanner.IntervalSeconds != 5 {
 		t.Errorf("default interval_seconds should be preserved: want 5, got %d", cfg.Scanner.IntervalSeconds)
 	}
@@ -140,7 +137,6 @@ error_storm_count = 20
 
 	cfg := result.Config
 
-	// Specified values should be applied.
 	if cfg.Scanner.IntervalSeconds != 10 {
 		t.Errorf("interval_seconds: want 10, got %d", cfg.Scanner.IntervalSeconds)
 	}
@@ -151,7 +147,6 @@ error_storm_count = 20
 		t.Errorf("error_storm_count: want 20, got %d", cfg.Alerts.ErrorStormCount)
 	}
 
-	// Unspecified values should use defaults.
 	if cfg.Receiver.GRPCPort != 4317 {
 		t.Errorf("grpc_port default: want 4317, got %d", cfg.Receiver.GRPCPort)
 	}
@@ -238,7 +233,6 @@ baz = 42
 		t.Error("expected warnings for unknown keys, got none")
 	}
 
-	// Verify we got warnings about both unknown sections.
 	foundMysterious := false
 	foundAnother := false
 	for _, w := range result.Warnings {
@@ -256,7 +250,6 @@ baz = 42
 		t.Error("expected warning for another_unknown, not found")
 	}
 
-	// Valid config should still be loaded.
 	if result.Config.Receiver.GRPCPort != 4317 {
 		t.Errorf("grpc_port should still be loaded: want 4317, got %d", result.Config.Receiver.GRPCPort)
 	}
@@ -281,7 +274,6 @@ func TestConfigParser_ModelContextLimits(t *testing.T) {
 
 	cfg := result.Config
 
-	// Check context limits.
 	if cfg.Models["claude-sonnet-4-5-20250929"] != 200000 {
 		t.Errorf("sonnet context limit: want 200000, got %d", cfg.Models["claude-sonnet-4-5-20250929"])
 	}
@@ -292,7 +284,6 @@ func TestConfigParser_ModelContextLimits(t *testing.T) {
 		t.Errorf("custom model context limit: want 128000, got %d", cfg.Models["my-custom-model"])
 	}
 
-	// Check pricing.
 	sonnetPricing, ok := cfg.Pricing["claude-sonnet-4-5-20250929"]
 	if !ok {
 		t.Fatal("sonnet pricing not found")
@@ -311,7 +302,6 @@ func TestConfigParser_ModelContextLimits(t *testing.T) {
 }
 
 func TestConfigParser_FileLoad(t *testing.T) {
-	// Test loading from an actual file.
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 
@@ -337,7 +327,6 @@ event_buffer_size = 2000
 	if result.Config.Display.EventBufferSize != 2000 {
 		t.Errorf("event_buffer_size from file: want 2000, got %d", result.Config.Display.EventBufferSize)
 	}
-	// Defaults should be preserved.
 	if result.Config.Receiver.HTTPPort != 4318 {
 		t.Errorf("http_port default: want 4318, got %d", result.Config.Receiver.HTTPPort)
 	}
@@ -349,7 +338,6 @@ func TestConfigParser_EmptyString(t *testing.T) {
 		t.Fatalf("unexpected error for empty config: %v", err)
 	}
 
-	// All defaults should be returned.
 	if result.Config.Receiver.GRPCPort != 4317 {
 		t.Errorf("grpc_port: want 4317, got %d", result.Config.Receiver.GRPCPort)
 	}
@@ -450,5 +438,122 @@ high_rejection_window_minutes = 0`,
 				t.Error("expected validation error, got nil")
 			}
 		})
+	}
+}
+
+func TestStorageConfig_Defaults(t *testing.T) {
+	result, err := LoadFrom("/nonexistent/path/config.toml")
+	if err != nil {
+		t.Fatalf("expected no error for missing config file, got: %v", err)
+	}
+
+	cfg := result.Config
+
+	if cfg.Storage.DBPath != "~/.local/share/cc-top/cc-top.db" {
+		t.Errorf("default db_path: want ~/.local/share/cc-top/cc-top.db, got %s", cfg.Storage.DBPath)
+	}
+	if cfg.Storage.RetentionDays != 7 {
+		t.Errorf("default retention_days: want 7, got %d", cfg.Storage.RetentionDays)
+	}
+	if cfg.Storage.SummaryRetentionDays != 90 {
+		t.Errorf("default summary_retention_days: want 90, got %d", cfg.Storage.SummaryRetentionDays)
+	}
+}
+
+func TestStorageConfig_ParseCustom(t *testing.T) {
+	tomlData := `
+[storage]
+db_path = "/custom/path/data.db"
+retention_days = 14
+summary_retention_days = 180
+`
+	result, err := LoadFromString(tomlData)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.Config.Storage.DBPath != "/custom/path/data.db" {
+		t.Errorf("db_path: want /custom/path/data.db, got %s", result.Config.Storage.DBPath)
+	}
+	if result.Config.Storage.RetentionDays != 14 {
+		t.Errorf("retention_days: want 14, got %d", result.Config.Storage.RetentionDays)
+	}
+	if result.Config.Storage.SummaryRetentionDays != 180 {
+		t.Errorf("summary_retention_days: want 180, got %d", result.Config.Storage.SummaryRetentionDays)
+	}
+}
+
+func TestStorageConfig_ValidationRejectsZeroRetention(t *testing.T) {
+	tests := []struct {
+		name string
+		toml string
+	}{
+		{
+			name: "retention_days zero",
+			toml: `[storage]
+retention_days = 0`,
+		},
+		{
+			name: "summary_retention_days zero",
+			toml: `[storage]
+summary_retention_days = 0`,
+		},
+		{
+			name: "retention_days negative",
+			toml: `[storage]
+retention_days = -1`,
+		},
+		{
+			name: "summary_retention_days negative",
+			toml: `[storage]
+summary_retention_days = -5`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := LoadFromString(tt.toml)
+			if err == nil {
+				t.Error("expected validation error for non-positive retention value, got nil")
+			}
+		})
+	}
+}
+
+func TestStorageConfig_EmptyDBPath(t *testing.T) {
+	tomlData := `
+[storage]
+db_path = ""
+retention_days = 7
+summary_retention_days = 90
+`
+	result, err := LoadFromString(tomlData)
+	if err != nil {
+		t.Fatalf("expected no error for empty db_path, got: %v", err)
+	}
+
+	if result.Config.Storage.DBPath != "" {
+		t.Errorf("db_path: want empty string, got %s", result.Config.Storage.DBPath)
+	}
+}
+
+func TestStorageConfig_UnknownKeyWarning(t *testing.T) {
+	tomlData := `
+[storage]
+db_path = "/tmp/test.db"
+retention_days = 7
+summary_retention_days = 90
+unknown_field = "value"
+`
+	result, err := LoadFromString(tomlData)
+	if err != nil {
+		t.Fatalf("unknown keys within sections should not cause errors, got: %v", err)
+	}
+
+	if result.Config.Storage.DBPath != "/tmp/test.db" {
+		t.Errorf("db_path: want /tmp/test.db, got %s", result.Config.Storage.DBPath)
+	}
+	if result.Config.Storage.RetentionDays != 7 {
+		t.Errorf("retention_days: want 7, got %d", result.Config.Storage.RetentionDays)
 	}
 }

@@ -4,31 +4,30 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/nixlim/cc-top/internal/stats"
 )
 
-// renderStats renders the full-screen stats dashboard.
 func (m Model) renderStats() string {
 	var sb strings.Builder
 
-	// Header.
 	viewLabel := " [Stats]"
 	if m.selectedSession != "" {
 		viewLabel += " Session: " + truncateID(m.selectedSession, 8)
 	} else {
 		viewLabel += " Global"
 	}
-	help := "Tab:Dashboard  q:Quit "
-	padding := m.width - len(" cc-top") - len(viewLabel) - len(help)
+	indicators := m.headerIndicators()
+	help := "Tab:History  q:Quit "
+	padding := m.width - lipgloss.Width(" cc-top") - lipgloss.Width(viewLabel) - lipgloss.Width(indicators) - lipgloss.Width(help)
 	if padding < 0 {
 		padding = 0
 	}
 	headerLine := headerStyle.Width(m.width).Render(
-		" cc-top" + viewLabel + strings.Repeat(" ", padding) + help)
+		" cc-top" + viewLabel + indicators + strings.Repeat(" ", padding) + help)
 	sb.WriteString(headerLine)
 	sb.WriteByte('\n')
 
-	// Get stats.
 	ds := m.getStats()
 
 	contentW := m.width - 4
@@ -36,7 +35,6 @@ func (m Model) renderStats() string {
 		contentW = 20
 	}
 
-	// Build stat sections.
 	sections := []string{
 		m.renderCodeSection(ds),
 		m.renderToolsSection(ds),
@@ -46,15 +44,13 @@ func (m Model) renderStats() string {
 		m.renderTopTools(ds),
 	}
 
-	// Join sections and apply scroll.
 	allLines := []string{}
 	for _, section := range sections {
 		allLines = append(allLines, section)
 		allLines = append(allLines, "")
 	}
 
-	// Apply scroll.
-	visibleH := m.height - 3 // header + padding
+	visibleH := m.height - 3
 	if visibleH < 1 {
 		visibleH = 1
 	}
@@ -78,7 +74,6 @@ func (m Model) renderStats() string {
 	return sb.String()
 }
 
-// getStats retrieves statistics from the stats provider.
 func (m Model) getStats() stats.DashboardStats {
 	if m.stats == nil {
 		return stats.DashboardStats{}
@@ -89,7 +84,6 @@ func (m Model) getStats() stats.DashboardStats {
 	return m.stats.GetGlobal()
 }
 
-// renderCodeSection renders lines added/removed, commits, and PRs.
 func (m Model) renderCodeSection(ds stats.DashboardStats) string {
 	title := panelTitleStyle.Render("Code Metrics")
 	lines := []string{
@@ -102,7 +96,6 @@ func (m Model) renderCodeSection(ds stats.DashboardStats) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderToolsSection renders tool acceptance rate.
 func (m Model) renderToolsSection(ds stats.DashboardStats) string {
 	title := panelTitleStyle.Render("Tool Acceptance")
 	lines := []string{title}
@@ -118,7 +111,6 @@ func (m Model) renderToolsSection(ds stats.DashboardStats) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderAPISection renders cache efficiency, avg latency, and error rate.
 func (m Model) renderAPISection(ds stats.DashboardStats) string {
 	title := panelTitleStyle.Render("API Performance")
 	lines := []string{
@@ -132,7 +124,6 @@ func (m Model) renderAPISection(ds stats.DashboardStats) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderTokenBreakdownSection renders the token type breakdown.
 func (m Model) renderTokenBreakdownSection(ds stats.DashboardStats) string {
 	title := panelTitleStyle.Render("Token Breakdown")
 	if len(ds.TokenBreakdown) == 0 {
@@ -148,7 +139,6 @@ func (m Model) renderTokenBreakdownSection(ds stats.DashboardStats) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderModelBreakdown renders cost and tokens by model.
 func (m Model) renderModelBreakdown(ds stats.DashboardStats) string {
 	title := panelTitleStyle.Render("Model Breakdown")
 	lines := []string{title}
@@ -166,7 +156,6 @@ func (m Model) renderModelBreakdown(ds stats.DashboardStats) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderTopTools renders the top tools ranked by frequency.
 func (m Model) renderTopTools(ds stats.DashboardStats) string {
 	title := panelTitleStyle.Render("Top Tools")
 	lines := []string{title}
@@ -174,7 +163,6 @@ func (m Model) renderTopTools(ds stats.DashboardStats) string {
 	if len(ds.TopTools) == 0 {
 		lines = append(lines, dimStyle.Render("  No tool data"))
 	} else {
-		// Find max count for bar scaling.
 		maxCount := 0
 		for _, t := range ds.TopTools {
 			if t.Count > maxCount {
@@ -194,7 +182,6 @@ func (m Model) renderTopTools(ds stats.DashboardStats) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderProgressBar renders a text-based progress bar of the given width.
 func renderProgressBar(ratio float64, width int) string {
 	if ratio < 0 {
 		ratio = 0
@@ -210,7 +197,6 @@ func renderProgressBar(ratio float64, width int) string {
 
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
 
-	// Color based on ratio.
 	if ratio >= 0.8 {
 		return costRedStyle.Render(bar)
 	}

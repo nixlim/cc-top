@@ -10,71 +10,52 @@ import (
 	"time"
 )
 
-// Store is the interface for the in-memory state store.
-// All methods must be thread-safe.
 type Store interface {
-	// AddMetric indexes a metric data point under the given session ID.
-	// If sessionID is empty, the metric is stored under the "unknown" bucket
-	// and a warning is logged.
 	AddMetric(sessionID string, m Metric)
 
-	// AddEvent indexes an event under the given session ID.
-	// If sessionID is empty, the event is stored under the "unknown" bucket
-	// and a warning is logged.
 	AddEvent(sessionID string, e Event)
 
-	// GetSession returns a snapshot of the session data for the given ID,
-	// or nil if the session does not exist.
 	GetSession(sessionID string) *SessionData
 
-	// ListSessions returns a snapshot of all sessions sorted by start time.
 	ListSessions() []SessionData
 
-	// GetAggregatedCost returns the sum of TotalCost across all sessions.
 	GetAggregatedCost() float64
 
-	// UpdatePID associates a PID with the given session.
 	UpdatePID(sessionID string, pid int)
 
-	// MarkExited marks all sessions associated with the given PID as exited.
 	MarkExited(pid int)
 
-	// UpdateMetadata updates the session metadata for the given session.
 	UpdateMetadata(sessionID string, meta SessionMetadata)
+
+	OnEvent(fn EventListener)
+
+	Close() error
+
+	DroppedWrites() int64
+
+	QueryDailySummaries(days int) []DailySummary
 }
 
-// EventListener is a callback invoked after a new event is stored.
-// It receives the resolved session ID and the event. Listeners are
-// called outside the store lock and must not call back into the store
-// in a way that acquires a write lock to avoid deadlocks.
 type EventListener func(sessionID string, e Event)
 
-// MemoryStore is a thread-safe in-memory implementation of Store.
-// It indexes metrics and events by session.id using a sync.RWMutex
-// for safe concurrent access.
 type MemoryStore struct {
 	mu             sync.RWMutex
 	sessions       map[string]*SessionData
 	eventListeners []EventListener
 }
 
-// NewMemoryStore creates a new empty MemoryStore ready for use.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		sessions: make(map[string]*SessionData),
 	}
 }
 
-// OnEvent registers a listener that is called after every AddEvent.
-// Listeners are invoked synchronously outside the store lock.
 func (ms *MemoryStore) OnEvent(fn EventListener) {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 	ms.eventListeners = append(ms.eventListeners, fn)
 }
 
-// resolveSessionID returns the provided sessionID if non-empty, or
-// UnknownSessionID with a warning log if empty.
 func resolveSessionID(sessionID string) string {
 	if sessionID == "" {
 		log.Printf("WARNING: metric/event received without session.id, storing under %q", UnknownSessionID)
@@ -83,8 +64,6 @@ func resolveSessionID(sessionID string) string {
 	return sessionID
 }
 
-// getOrCreateSession returns the existing session or creates a new one.
-// Caller must hold ms.mu (write lock).
 func (ms *MemoryStore) getOrCreateSession(sessionID string) *SessionData {
 	s, ok := ms.sessions[sessionID]
 	if !ok {
@@ -98,10 +77,7 @@ func (ms *MemoryStore) getOrCreateSession(sessionID string) *SessionData {
 	return s
 }
 
-// metricKey builds a deterministic key for counter reset tracking from a
-// metric name and its attributes. The key format is:
-// "metric_name|attr1=val1,attr2=val2" with attributes sorted by key.
-func metricKey(name string, attrs map[string]string) string {
+func MetricKey(name string, attrs map[string]string) string {
 	if len(attrs) == 0 {
 		return name
 	}
@@ -117,17 +93,12 @@ func metricKey(name string, attrs map[string]string) string {
 	return name + "|" + strings.Join(parts, ",")
 }
 
-// AddMetric indexes a metric data point under the given session ID.
-// Counter resets (negative deltas) are handled by treating the previous
-// value as 0 and computing the delta from there.
 func (ms *MemoryStore) AddMetric(sessionID string, m Metric) {
 	sessionID = resolveSessionID(sessionID)
 
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
 
-	// For session.count metrics, create the session with the metric timestamp
-	// instead of time.Now() so StartedAt reflects the actual session start.
 	if m.Name == "claude_code.session.count" {
 		if _, exists := ms.sessions[sessionID]; !exists {
 			ts := m.Timestamp
@@ -151,8 +122,7 @@ func (ms *MemoryStore) AddMetric(sessionID string, m Metric) {
 		s.LastEventAt = time.Now()
 	}
 
-	// Compute delta for cumulative counters with counter reset handling.
-	key := metricKey(m.Name, m.Attributes)
+	key := MetricKey(m.Name, m.Attributes)
 	prev, hasPrev := s.PreviousValues[key]
 	s.PreviousValues[key] = m.Value
 
@@ -162,12 +132,10 @@ func (ms *MemoryStore) AddMetric(sessionID string, m Metric) {
 	} else {
 		delta = m.Value - prev
 		if delta < 0 {
-			// Counter reset: treat previous as 0.
 			delta = m.Value
 		}
 	}
 
-	// Update aggregated session fields based on metric type.
 	switch m.Name {
 	case "claude_code.cost.usage":
 		s.TotalCost += delta
@@ -177,22 +145,18 @@ func (ms *MemoryStore) AddMetric(sessionID string, m Metric) {
 		s.ActiveTime += time.Duration(delta * float64(time.Second))
 	}
 
-	// Track model from api_request-related attributes if present.
 	if model, ok := m.Attributes["model"]; ok && model != "" {
 		s.Model = model
 	}
 
-	// Track terminal from attributes if present.
 	if terminal, ok := m.Attributes["terminal.type"]; ok && terminal != "" {
 		s.Terminal = terminal
 	}
 
-	// Track fast mode from speed attribute.
 	if speed, ok := m.Attributes["speed"]; ok && speed != "" {
 		s.FastMode = true
 	}
 
-	// Extract org and user identity attributes.
 	if orgID, ok := m.Attributes["organization.id"]; ok && orgID != "" {
 		s.OrgID = orgID
 	}
@@ -201,7 +165,6 @@ func (ms *MemoryStore) AddMetric(sessionID string, m Metric) {
 	}
 }
 
-// AddEvent indexes an event under the given session ID.
 func (ms *MemoryStore) AddEvent(sessionID string, e Event) {
 	sessionID = resolveSessionID(sessionID)
 
@@ -209,7 +172,6 @@ func (ms *MemoryStore) AddEvent(sessionID string, e Event) {
 
 	s := ms.getOrCreateSession(sessionID)
 
-	// Extract sequence number from event attributes.
 	if seqStr, ok := e.Attributes["event.sequence"]; ok {
 		if seq, err := strconv.ParseInt(seqStr, 10, 64); err == nil {
 			e.Sequence = seq
@@ -218,7 +180,6 @@ func (ms *MemoryStore) AddEvent(sessionID string, e Event) {
 
 	s.Events = append(s.Events, e)
 
-	// Keep events sorted by sequence (primary) then timestamp (secondary).
 	sort.SliceStable(s.Events, func(i, j int) bool {
 		ei, ej := s.Events[i], s.Events[j]
 		if ei.Sequence != 0 && ej.Sequence != 0 {
@@ -239,12 +200,10 @@ func (ms *MemoryStore) AddEvent(sessionID string, e Event) {
 		s.LastEventAt = time.Now()
 	}
 
-	// Track model from any event that carries it (api_request, api_error, etc.).
 	if model, ok := e.Attributes["model"]; ok && model != "" {
 		s.Model = model
 	}
 
-	// Extract cache tokens from api_request events.
 	if e.Name == "claude_code.api_request" {
 		if v, ok := e.Attributes["cache_read_tokens"]; ok {
 			if n, err := strconv.ParseInt(v, 10, 64); err == nil {
@@ -258,14 +217,12 @@ func (ms *MemoryStore) AddEvent(sessionID string, e Event) {
 		}
 	}
 
-	// Track fast mode from speed attribute.
 	if speed, ok := e.Attributes["speed"]; ok && speed != "" {
 		s.FastMode = true
 	} else {
 		s.FastMode = false
 	}
 
-	// Extract org and user identity attributes.
 	if orgID, ok := e.Attributes["organization.id"]; ok && orgID != "" {
 		s.OrgID = orgID
 	}
@@ -273,19 +230,15 @@ func (ms *MemoryStore) AddEvent(sessionID string, e Event) {
 		s.UserUUID = userUUID
 	}
 
-	// Snapshot listeners while holding the lock.
 	listeners := ms.eventListeners
 
 	ms.mu.Unlock()
 
-	// Notify listeners outside the lock to prevent deadlocks.
 	for _, fn := range listeners {
 		fn(sessionID, e)
 	}
 }
 
-// GetSession returns a deep copy of the session data for the given ID,
-// or nil if the session does not exist.
 func (ms *MemoryStore) GetSession(sessionID string) *SessionData {
 	ms.mu.RLock()
 	defer ms.mu.RUnlock()
@@ -297,8 +250,6 @@ func (ms *MemoryStore) GetSession(sessionID string) *SessionData {
 	return ms.copySession(s)
 }
 
-// ListSessions returns a snapshot of all sessions sorted by start time
-// (oldest first).
 func (ms *MemoryStore) ListSessions() []SessionData {
 	ms.mu.RLock()
 	defer ms.mu.RUnlock()
@@ -314,7 +265,6 @@ func (ms *MemoryStore) ListSessions() []SessionData {
 	return result
 }
 
-// GetAggregatedCost returns the sum of TotalCost across all sessions.
 func (ms *MemoryStore) GetAggregatedCost() float64 {
 	ms.mu.RLock()
 	defer ms.mu.RUnlock()
@@ -326,7 +276,6 @@ func (ms *MemoryStore) GetAggregatedCost() float64 {
 	return total
 }
 
-// UpdatePID associates a PID with the given session.
 func (ms *MemoryStore) UpdatePID(sessionID string, pid int) {
 	ms.mu.Lock()
 	defer ms.mu.Unlock()
@@ -335,8 +284,6 @@ func (ms *MemoryStore) UpdatePID(sessionID string, pid int) {
 	s.PID = pid
 }
 
-// MarkExited marks all sessions associated with the given PID as exited.
-// Sessions with PID 0 (uncorrelated) are never marked by this method.
 func (ms *MemoryStore) MarkExited(pid int) {
 	if pid == 0 {
 		return
@@ -352,7 +299,6 @@ func (ms *MemoryStore) MarkExited(pid int) {
 	}
 }
 
-// UpdateMetadata updates the session metadata for the given session.
 func (ms *MemoryStore) UpdateMetadata(sessionID string, meta SessionMetadata) {
 	sessionID = resolveSessionID(sessionID)
 
@@ -374,12 +320,27 @@ func (ms *MemoryStore) UpdateMetadata(sessionID string, meta SessionMetadata) {
 	}
 }
 
-// copySession returns a deep copy of a SessionData to prevent callers
-// from mutating internal state.
+func (ms *MemoryStore) Close() error {
+	return nil
+}
+
+func (ms *MemoryStore) DroppedWrites() int64 {
+	return 0
+}
+
+func (ms *MemoryStore) QueryDailySummaries(days int) []DailySummary {
+	return nil
+}
+
+func (ms *MemoryStore) RestoreSession(session *SessionData) {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	ms.sessions[session.SessionID] = session
+}
+
 func (ms *MemoryStore) copySession(s *SessionData) *SessionData {
 	cp := *s
 
-	// Deep copy slices.
 	if len(s.Metrics) > 0 {
 		cp.Metrics = make([]Metric, len(s.Metrics))
 		copy(cp.Metrics, s.Metrics)
@@ -389,7 +350,6 @@ func (ms *MemoryStore) copySession(s *SessionData) *SessionData {
 		copy(cp.Events, s.Events)
 	}
 
-	// Deep copy maps.
 	if len(s.PreviousValues) > 0 {
 		cp.PreviousValues = make(map[string]float64, len(s.PreviousValues))
 		for k, v := range s.PreviousValues {

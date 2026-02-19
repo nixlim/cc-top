@@ -1,7 +1,5 @@
 package config
 
-// DefaultConfig returns a Config with all default values.
-// These defaults allow cc-top to work out of the box with zero configuration.
 func DefaultConfig() Config {
 	return Config{
 		Receiver: ReceiverConfig{
@@ -34,6 +32,11 @@ func DefaultConfig() Config {
 			CostColorGreenBelow:  0.50,
 			CostColorYellowBelow: 2.00,
 		},
+		Storage: StorageConfig{
+			DBPath:               "~/.local/share/cc-top/cc-top.db",
+			RetentionDays:        7,
+			SummaryRetentionDays: 90,
+		},
 		Models: defaultModelContextLimits(),
 		Pricing: map[string][4]float64{
 			"claude-sonnet-4-5-20250929": {3.00, 15.00, 0.30, 3.75},
@@ -43,7 +46,6 @@ func DefaultConfig() Config {
 	}
 }
 
-// defaultModelContextLimits returns the built-in model context token limits.
 func defaultModelContextLimits() map[string]int {
 	return map[string]int{
 		"claude-sonnet-4-5-20250929": 200000,

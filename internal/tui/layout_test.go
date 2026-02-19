@@ -17,7 +17,6 @@ import (
 	"github.com/nixlim/cc-top/internal/stats"
 )
 
-// --- Mock providers for testing ---
 
 type mockStateProvider struct {
 	sessions []state.SessionData
@@ -44,6 +43,11 @@ func (m *mockStateProvider) GetAggregatedCost() float64 {
 	}
 	return total
 }
+
+func (m *mockStateProvider) QueryDailySummaries(_ int) []state.DailySummary {
+	return nil
+}
+func (m *mockStateProvider) DroppedWrites() int64 { return 0 }
 
 type mockBurnRateProvider struct {
 	global  burnrate.BurnRate
@@ -119,22 +123,18 @@ func (m *mockStatsProvider) GetGlobal() stats.DashboardStats {
 	return m.global
 }
 
-// --- Tests ---
 
 func TestComputeDimensions_LargeTerminal(t *testing.T) {
 	dims := computeDimensions(120, 40)
 
-	// Session list should be ~40% of 120 = 48.
 	if dims.sessionListW < 40 || dims.sessionListW > 60 {
 		t.Errorf("sessionListW = %d, want ~48", dims.sessionListW)
 	}
 
-	// Burn rate should fill right side.
 	if dims.burnRateW < 50 {
 		t.Errorf("burnRateW = %d, want >= 50", dims.burnRateW)
 	}
 
-	// All heights should be positive.
 	if dims.sessionListH <= 0 {
 		t.Errorf("sessionListH = %d, want > 0", dims.sessionListH)
 	}
@@ -148,8 +148,6 @@ func TestComputeDimensions_LargeTerminal(t *testing.T) {
 		t.Errorf("alertsH = %d, want > 0", dims.alertsH)
 	}
 
-	// Height budget: header + burnRate + eventStream + alerts = totalH.
-	// The right column (burnRate + eventStream) must equal sessionListH.
 	rightH := dims.burnRateH + dims.eventStreamH
 	if rightH != dims.sessionListH {
 		t.Errorf("burnRateH(%d) + eventStreamH(%d) = %d, want sessionListH = %d",
@@ -165,7 +163,6 @@ func TestComputeDimensions_LargeTerminal(t *testing.T) {
 func TestComputeDimensions_SmallTerminal(t *testing.T) {
 	dims := computeDimensions(80, 24)
 
-	// All dimensions should be positive.
 	if dims.sessionListW <= 0 {
 		t.Errorf("sessionListW = %d, want > 0", dims.sessionListW)
 	}
@@ -177,7 +174,6 @@ func TestComputeDimensions_SmallTerminal(t *testing.T) {
 func TestComputeDimensions_MinimumTerminal(t *testing.T) {
 	dims := computeDimensions(20, 8)
 
-	// Should not panic with very small sizes.
 	if dims.sessionListW <= 0 {
 		t.Errorf("sessionListW = %d, want > 0", dims.sessionListW)
 	}
@@ -282,18 +278,22 @@ func TestModel_TabToggle(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	// Tab should switch to stats.
 	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m2 := result.(Model)
 	if m2.view != ViewStats {
 		t.Errorf("after Tab, view = %d, want ViewStats (%d)", m2.view, ViewStats)
 	}
 
-	// Tab again should switch back to dashboard.
 	result, _ = m2.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m3 := result.(Model)
-	if m3.view != ViewDashboard {
-		t.Errorf("after second Tab, view = %d, want ViewDashboard (%d)", m3.view, ViewDashboard)
+	if m3.view != ViewHistory {
+		t.Errorf("after second Tab, view = %d, want ViewHistory (%d)", m3.view, ViewHistory)
+	}
+
+	result, _ = m3.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m4 := result.(Model)
+	if m4.view != ViewDashboard {
+		t.Errorf("after third Tab, view = %d, want ViewDashboard (%d)", m4.view, ViewDashboard)
 	}
 }
 
@@ -327,21 +327,18 @@ func TestModel_SessionNavigation(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	// Navigate down.
 	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m2 := result.(Model)
 	if m2.sessionCursor != 1 {
 		t.Errorf("after Down, sessionCursor = %d, want 1", m2.sessionCursor)
 	}
 
-	// Select with Enter.
 	result, _ = m2.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m3 := result.(Model)
 	if m3.selectedSession != "sess-002" {
 		t.Errorf("after Enter, selectedSession = %q, want %q", m3.selectedSession, "sess-002")
 	}
 
-	// Escape returns to global.
 	result, _ = m3.Update(tea.KeyMsg{Type: tea.KeyEscape})
 	m4 := result.(Model)
 	if m4.selectedSession != "" {
@@ -382,21 +379,18 @@ func TestModel_FilterMenu(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	// Open filter menu.
 	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
 	m2 := result.(Model)
 	if !m2.filterMenu.Active {
 		t.Error("after 'f', filter menu should be active")
 	}
 
-	// Navigate and toggle.
 	result, _ = m2.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m3 := result.(Model)
 	if m3.filterMenu.Cursor != 1 {
 		t.Errorf("filter cursor = %d, want 1", m3.filterMenu.Cursor)
 	}
 
-	// Close with Escape.
 	result, _ = m3.Update(tea.KeyMsg{Type: tea.KeyEscape})
 	m4 := result.(Model)
 	if m4.filterMenu.Active {
@@ -506,8 +500,6 @@ func TestModel_QuittingView(t *testing.T) {
 	}
 }
 
-// TestModel_ViewZeroDimensions verifies that all views render without panicking
-// when width and height are zero (the state before the first WindowSizeMsg).
 func TestModel_ViewZeroDimensions(t *testing.T) {
 	cfg := config.DefaultConfig()
 
@@ -518,16 +510,14 @@ func TestModel_ViewZeroDimensions(t *testing.T) {
 		{"startup", ViewStartup},
 		{"dashboard", ViewDashboard},
 		{"stats", ViewStats},
+		{"history", ViewHistory},
 	}
 
-	// Sub-cases: no providers, with scanner+processes, with alerts.
 	for _, v := range views {
 		t.Run(v.name+"_nil_providers", func(t *testing.T) {
 			m := NewModel(cfg, WithStartView(v.view))
-			// width=0 and height=0 (default), simulating pre-WindowSizeMsg state.
 			result := m.View()
 			if result == "" && v.view != ViewStartup {
-				// Dashboard/stats may return empty at zero size; just ensure no panic.
 				_ = result
 			}
 		})
@@ -554,13 +544,11 @@ func TestModel_ViewZeroDimensions(t *testing.T) {
 				WithStateProvider(&mockStateProvider{}),
 				WithStatsProvider(&mockStatsProvider{}),
 			)
-			// Zero dimensions.
 			_ = m.View()
 		})
 	}
 }
 
-// TestModel_ViewSmallDimensions verifies rendering at very small terminal sizes.
 func TestModel_ViewSmallDimensions(t *testing.T) {
 	cfg := config.DefaultConfig()
 
@@ -581,6 +569,7 @@ func TestModel_ViewSmallDimensions(t *testing.T) {
 		{"startup", ViewStartup},
 		{"dashboard", ViewDashboard},
 		{"stats", ViewStats},
+		{"history", ViewHistory},
 	}
 
 	mockScanner := &mockScannerProvider{
@@ -603,14 +592,12 @@ func TestModel_ViewSmallDimensions(t *testing.T) {
 				)
 				m.width = sz.width
 				m.height = sz.height
-				// Must not panic.
 				_ = m.View()
 			})
 		}
 	}
 }
 
-// --- Panel Focus and Detail Overlay Tests ---
 
 func TestModel_FocusEvents(t *testing.T) {
 	cfg := config.DefaultConfig()
@@ -627,12 +614,10 @@ func TestModel_FocusEvents(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	// Default focus is sessions.
 	if m.panelFocus != FocusSessions {
 		t.Errorf("default panelFocus = %d, want FocusSessions (%d)", m.panelFocus, FocusSessions)
 	}
 
-	// Press 'e' to focus events.
 	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	m2 := result.(Model)
 	if m2.panelFocus != FocusEvents {
@@ -641,40 +626,34 @@ func TestModel_FocusEvents(t *testing.T) {
 	if m2.autoScroll {
 		t.Error("after focusing events, autoScroll should be false")
 	}
-	// Event cursor should be set to last event.
 	if m2.eventCursor != 2 {
 		t.Errorf("after 'e', eventCursor = %d, want 2", m2.eventCursor)
 	}
 
-	// Navigate up.
 	result, _ = m2.Update(tea.KeyMsg{Type: tea.KeyUp})
 	m3 := result.(Model)
 	if m3.eventCursor != 1 {
 		t.Errorf("after Up, eventCursor = %d, want 1", m3.eventCursor)
 	}
 
-	// Navigate up again.
 	result, _ = m3.Update(tea.KeyMsg{Type: tea.KeyUp})
 	m4 := result.(Model)
 	if m4.eventCursor != 0 {
 		t.Errorf("after Up, eventCursor = %d, want 0", m4.eventCursor)
 	}
 
-	// Can't go above 0.
 	result, _ = m4.Update(tea.KeyMsg{Type: tea.KeyUp})
 	m5 := result.(Model)
 	if m5.eventCursor != 0 {
 		t.Errorf("after Up at 0, eventCursor = %d, want 0", m5.eventCursor)
 	}
 
-	// Navigate down.
 	result, _ = m5.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m6 := result.(Model)
 	if m6.eventCursor != 1 {
 		t.Errorf("after Down, eventCursor = %d, want 1", m6.eventCursor)
 	}
 
-	// Escape returns to sessions focus and re-enables auto-scroll.
 	result, _ = m6.Update(tea.KeyMsg{Type: tea.KeyEscape})
 	m7 := result.(Model)
 	if m7.panelFocus != FocusSessions {
@@ -698,7 +677,6 @@ func TestModel_FocusAlerts(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	// Press 'a' to focus alerts.
 	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	m2 := result.(Model)
 	if m2.panelFocus != FocusAlerts {
@@ -708,21 +686,18 @@ func TestModel_FocusAlerts(t *testing.T) {
 		t.Errorf("after 'a', alertCursor = %d, want 0", m2.alertCursor)
 	}
 
-	// Navigate down.
 	result, _ = m2.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m3 := result.(Model)
 	if m3.alertCursor != 1 {
 		t.Errorf("after Down, alertCursor = %d, want 1", m3.alertCursor)
 	}
 
-	// Can't go past end.
 	result, _ = m3.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m4 := result.(Model)
 	if m4.alertCursor != 1 {
 		t.Errorf("after Down at end, alertCursor = %d, want 1", m4.alertCursor)
 	}
 
-	// Escape returns to sessions.
 	result, _ = m4.Update(tea.KeyMsg{Type: tea.KeyEscape})
 	m5 := result.(Model)
 	if m5.panelFocus != FocusSessions {
@@ -749,11 +724,9 @@ func TestModel_EventDetailOverlay(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	// Focus events.
 	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	m2 := result.(Model)
 
-	// Press Enter to open detail.
 	result, _ = m2.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m3 := result.(Model)
 	if !m3.detailOverlay {
@@ -772,13 +745,11 @@ func TestModel_EventDetailOverlay(t *testing.T) {
 		t.Error("detail content should contain the full formatted event text")
 	}
 
-	// Render should not panic and should contain the detail overlay.
 	view := m3.View()
 	if view == "" {
 		t.Error("View() returned empty string with detail overlay")
 	}
 
-	// Escape closes the overlay.
 	result, _ = m3.Update(tea.KeyMsg{Type: tea.KeyEscape})
 	m4 := result.(Model)
 	if m4.detailOverlay {
@@ -807,7 +778,6 @@ func TestModel_AlertDetailOverlay(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	// Focus alerts, then enter.
 	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	m2 := result.(Model)
 
@@ -829,13 +799,11 @@ func TestModel_AlertDetailOverlay(t *testing.T) {
 		t.Error("detail content should contain full message")
 	}
 
-	// Render with overlay.
 	view := m3.View()
 	if view == "" {
 		t.Error("View() returned empty string with alert detail overlay")
 	}
 
-	// Enter also closes the overlay.
 	result, _ = m3.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m4 := result.(Model)
 	if m4.detailOverlay {
@@ -861,7 +829,6 @@ func TestModel_DetailOverlayScroll(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	// Focus alerts and open detail.
 	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	m2 := result.(Model)
 	result, _ = m2.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -871,21 +838,18 @@ func TestModel_DetailOverlayScroll(t *testing.T) {
 		t.Errorf("initial detailScrollPos = %d, want 0", m3.detailScrollPos)
 	}
 
-	// Scroll down.
 	result, _ = m3.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m4 := result.(Model)
 	if m4.detailScrollPos != 1 {
 		t.Errorf("after Down, detailScrollPos = %d, want 1", m4.detailScrollPos)
 	}
 
-	// Scroll up.
 	result, _ = m4.Update(tea.KeyMsg{Type: tea.KeyUp})
 	m5 := result.(Model)
 	if m5.detailScrollPos != 0 {
 		t.Errorf("after Up, detailScrollPos = %d, want 0", m5.detailScrollPos)
 	}
 
-	// Can't go below 0.
 	result, _ = m5.Update(tea.KeyMsg{Type: tea.KeyUp})
 	m6 := result.(Model)
 	if m6.detailScrollPos != 0 {
@@ -899,33 +863,28 @@ func TestModel_FocusSwitchBetweenPanels(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	// Start at sessions.
 	if m.panelFocus != FocusSessions {
 		t.Fatalf("initial focus = %d, want FocusSessions", m.panelFocus)
 	}
 
-	// 'e' -> events.
 	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	m2 := result.(Model)
 	if m2.panelFocus != FocusEvents {
 		t.Errorf("after 'e', focus = %d, want FocusEvents", m2.panelFocus)
 	}
 
-	// 'a' from events -> alerts.
 	result, _ = m2.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	m3 := result.(Model)
 	if m3.panelFocus != FocusAlerts {
 		t.Errorf("after 'a' from events, focus = %d, want FocusAlerts", m3.panelFocus)
 	}
 
-	// 'e' from alerts -> events.
 	result, _ = m3.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	m4 := result.(Model)
 	if m4.panelFocus != FocusEvents {
 		t.Errorf("after 'e' from alerts, focus = %d, want FocusEvents", m4.panelFocus)
 	}
 
-	// Esc -> sessions.
 	result, _ = m4.Update(tea.KeyMsg{Type: tea.KeyEscape})
 	m5 := result.(Model)
 	if m5.panelFocus != FocusSessions {
@@ -946,24 +905,20 @@ func TestModel_DetailOverlayBlocksOtherKeys(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	// Focus events and open detail.
 	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	m2 := result.(Model)
 	result, _ = m2.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m3 := result.(Model)
 
-	// Tab should NOT switch views while detail is open.
 	result, _ = m3.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m4 := result.(Model)
 	if m4.view != ViewDashboard {
 		t.Error("Tab should not switch views while detail overlay is open")
 	}
-	// Detail should still be open.
 	if !m4.detailOverlay {
 		t.Error("detail overlay should still be open after Tab")
 	}
 
-	// 'f' should not open filter menu.
 	result, _ = m4.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
 	m5 := result.(Model)
 	if m5.filterMenu.Active {
@@ -977,7 +932,6 @@ func TestModel_HeaderHelp(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	// Default: sessions focus shows a/e/Tab help.
 	help := m.headerHelp()
 	if !strings.Contains(help, "a:Alerts") {
 		t.Error("sessions focus header should contain 'a:Alerts'")
@@ -986,7 +940,6 @@ func TestModel_HeaderHelp(t *testing.T) {
 		t.Error("sessions focus header should contain 'e:Events'")
 	}
 
-	// Events focus.
 	m.panelFocus = FocusEvents
 	help = m.headerHelp()
 	if !strings.Contains(help, "Enter:Detail") {
@@ -996,7 +949,6 @@ func TestModel_HeaderHelp(t *testing.T) {
 		t.Error("events focus header should contain 'Esc:Back'")
 	}
 
-	// Alerts focus.
 	m.panelFocus = FocusAlerts
 	help = m.headerHelp()
 	if !strings.Contains(help, "Enter:Detail") {
@@ -1013,14 +965,12 @@ func TestModel_FocusEventsEmptyList(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	// Focus events when there are no events.
 	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	m2 := result.(Model)
 	if m2.panelFocus != FocusEvents {
 		t.Errorf("should still focus events even if empty")
 	}
 
-	// Enter on empty should not open detail.
 	result, _ = m2.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m3 := result.(Model)
 	if m3.detailOverlay {
@@ -1035,14 +985,12 @@ func TestModel_FocusAlertsEmptyList(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	// Focus alerts when there are no alerts.
 	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	m2 := result.(Model)
 	if m2.panelFocus != FocusAlerts {
 		t.Errorf("should still focus alerts even if empty")
 	}
 
-	// Enter on empty should not open detail.
 	result, _ = m2.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m3 := result.(Model)
 	if m3.detailOverlay {
@@ -1056,7 +1004,6 @@ func TestModel_TabResetsFocus(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	// Focus events, then Tab to stats.
 	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	m2 := result.(Model)
 	result, _ = m2.Update(tea.KeyMsg{Type: tea.KeyTab})
@@ -1090,9 +1037,6 @@ func TestStripAnsi(t *testing.T) {
 	}
 }
 
-// TestModel_ViewClampedToTerminalHeight verifies that View() output never
-// exceeds m.height lines, ensuring the header is never pushed off-screen
-// when the terminal is resized small.
 func TestModel_ViewClampedToTerminalHeight(t *testing.T) {
 	cfg := config.DefaultConfig()
 	mockAlerts := &mockAlertProvider{
@@ -1127,7 +1071,6 @@ func TestModel_ViewClampedToTerminalHeight(t *testing.T) {
 				t.Errorf("View() output has %d lines, want at most %d", len(lines), sz.height)
 			}
 
-			// Header should always be on the first line.
 			if len(lines) > 0 && !strings.Contains(lines[0], "cc-top") {
 				t.Errorf("first line = %q, want to contain 'cc-top'", lines[0])
 			}
@@ -1135,9 +1078,6 @@ func TestModel_ViewClampedToTerminalHeight(t *testing.T) {
 	}
 }
 
-// TestModel_AlertsBarVisible verifies that the alerts bar is never pushed
-// off-screen at various terminal sizes. The layout must be exactly m.height
-// lines with the alerts bar visible at the bottom.
 func TestModel_AlertsBarVisible(t *testing.T) {
 	cfg := config.DefaultConfig()
 	mockAlerts := &mockAlertProvider{
@@ -1173,7 +1113,6 @@ func TestModel_AlertsBarVisible(t *testing.T) {
 			)
 			m.width = sz.width
 			m.height = sz.height
-			// Populate cached burn rate so big digits render.
 			m.cachedBurnRate = mockBR.global
 
 			view := m.View()
@@ -1183,7 +1122,6 @@ func TestModel_AlertsBarVisible(t *testing.T) {
 				t.Errorf("View() has %d lines, want at most %d", len(lines), sz.height)
 			}
 
-			// The alerts bar should be visible somewhere in the output.
 			found := false
 			for _, line := range lines {
 				if strings.Contains(line, "CostSurge") || strings.Contains(line, "Alerts") || strings.Contains(line, "!!") {
@@ -1199,8 +1137,6 @@ func TestModel_AlertsBarVisible(t *testing.T) {
 	}
 }
 
-// TestRenderBorderedPanel_ClampsContent verifies that renderBorderedPanel
-// produces output with exactly h lines, even when content overflows.
 func TestRenderBorderedPanel_ClampsContent(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -1256,7 +1192,6 @@ func TestModel_RenderWithFocusedPanels(t *testing.T) {
 	m.width = 120
 	m.height = 40
 
-	// Render with events focused.
 	m.panelFocus = FocusEvents
 	m.eventCursor = 0
 	view := m.View()
@@ -1264,7 +1199,6 @@ func TestModel_RenderWithFocusedPanels(t *testing.T) {
 		t.Error("View() returned empty string with events focused")
 	}
 
-	// Render with alerts focused.
 	m.panelFocus = FocusAlerts
 	m.alertCursor = 0
 	view = m.View()
@@ -1272,12 +1206,73 @@ func TestModel_RenderWithFocusedPanels(t *testing.T) {
 		t.Error("View() returned empty string with alerts focused")
 	}
 
-	// Render with detail overlay.
 	m.detailOverlay = true
 	m.detailTitle = "Test"
 	m.detailContent = "Test content"
 	view = m.View()
 	if view == "" {
 		t.Error("View() returned empty string with detail overlay")
+	}
+}
+
+func TestTabCycle_DashboardStatsHistory(t *testing.T) {
+	cfg := config.DefaultConfig()
+	m := NewModel(cfg, WithStartView(ViewDashboard), WithStateProvider(&mockStateProvider{}), WithPersistenceFlag(true))
+	m.width = 120
+	m.height = 40
+
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m1 := result.(Model)
+	if m1.view != ViewStats {
+		t.Fatalf("Dashboard Tab: got view %d, want ViewStats (%d)", m1.view, ViewStats)
+	}
+
+	result, _ = m1.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m2 := result.(Model)
+	if m2.view != ViewHistory {
+		t.Fatalf("Stats Tab: got view %d, want ViewHistory (%d)", m2.view, ViewHistory)
+	}
+
+	result, _ = m2.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m3 := result.(Model)
+	if m3.view != ViewDashboard {
+		t.Fatalf("History Tab: got view %d, want ViewDashboard (%d)", m3.view, ViewDashboard)
+	}
+}
+
+func TestNoPersistenceIndicator(t *testing.T) {
+	cfg := config.DefaultConfig()
+
+	views := []struct {
+		name string
+		view ViewState
+	}{
+		{"dashboard", ViewDashboard},
+		{"stats", ViewStats},
+		{"history", ViewHistory},
+	}
+
+	for _, v := range views {
+		t.Run(v.name+"_no_persistence", func(t *testing.T) {
+			m := NewModel(cfg, WithStartView(v.view), WithStateProvider(&mockStateProvider{}), WithPersistenceFlag(false))
+			m.width = 120
+			m.height = 40
+
+			output := m.View()
+			if !strings.Contains(output, "No persistence") {
+				t.Errorf("%s view should contain 'No persistence' when isPersistent=false", v.name)
+			}
+		})
+
+		t.Run(v.name+"_with_persistence", func(t *testing.T) {
+			m := NewModel(cfg, WithStartView(v.view), WithStateProvider(&mockStateProvider{}), WithPersistenceFlag(true))
+			m.width = 120
+			m.height = 40
+
+			output := m.View()
+			if strings.Contains(output, "No persistence") {
+				t.Errorf("%s view should NOT contain 'No persistence' when isPersistent=true", v.name)
+			}
+		})
 	}
 }

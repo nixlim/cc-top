@@ -28,6 +28,11 @@ refresh_rate_ms = 500
 cost_color_green_below = 0.50
 cost_color_yellow_below = 2.00
 
+[storage]
+db_path = "~/.local/share/cc-top/cc-top.db"
+retention_days = 7
+summary_retention_days = 90
+
 [models]
 claude-sonnet-4-5-20250929 = 200000
 claude-opus-4-6 = 200000

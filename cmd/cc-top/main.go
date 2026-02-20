@@ -89,7 +89,7 @@ func main() {
 	})
 
 	// Create the alert engine.
-	notifier := alerts.NewOSAScriptNotifier(cfg.Alerts.Notifications.SystemNotify)
+	notifier := alerts.NewPlatformNotifier(cfg.Alerts.Notifications.SystemNotify)
 	alertEngine := alerts.NewEngine(store, cfg, brCalc, alerts.WithNotifier(notifier))
 
 	// Create the stats calculator.

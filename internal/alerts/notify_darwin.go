@@ -69,17 +69,14 @@ func sendOSANotification(title, subtitle, message string) error {
 	return cmd.Run()
 }
 
+// NewPlatformNotifier creates the platform-appropriate notifier for macOS.
+func NewPlatformNotifier(enabled bool) Notifier {
+	return NewOSAScriptNotifier(enabled)
+}
+
 // escapeAppleScript escapes characters that could break AppleScript strings.
 func escapeAppleScript(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `"`, `\"`)
 	return s
-}
-
-// truncateSessionID shortens a session ID for display in notifications.
-func truncateSessionID(id string) string {
-	if len(id) <= 12 {
-		return id
-	}
-	return id[:12] + "..."
 }

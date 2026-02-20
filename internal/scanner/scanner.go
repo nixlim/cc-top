@@ -1,4 +1,5 @@
-// Package scanner discovers Claude Code processes on macOS using libproc APIs.
+// Package scanner discovers Claude Code processes using platform-specific APIs.
+// On macOS it uses libproc; on Linux it reads /proc.
 // It periodically scans for processes named "claude" or node processes with
 // "@anthropic-ai/claude-code" in their argv, extracting PID, binary name,
 // CWD, terminal type, and environment variables for telemetry classification.
@@ -8,7 +9,6 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,7 +23,7 @@ type RawProcessInfo struct {
 }
 
 // ProcessAPI abstracts the low-level OS process inspection calls.
-// Production code uses darwinProcessAPI (cgo/libproc); tests use mocks.
+// Production code uses platform-specific implementations; tests use mocks.
 type ProcessAPI interface {
 	// ListAllPIDs returns all PIDs visible to the current user.
 	ListAllPIDs() ([]int, error)
@@ -74,22 +74,6 @@ func NewScanner(api ProcessAPI, interval time.Duration) *Scanner {
 		stopCh:   make(chan struct{}),
 		done:     make(chan struct{}),
 	}
-}
-
-// NewDefaultScanner creates a Scanner using the real macOS libproc API
-// and the given scan interval in seconds. This is the production constructor.
-func NewDefaultScanner(intervalSeconds int) *Scanner {
-	s := NewScanner(newDarwinProcessAPI(), time.Duration(intervalSeconds)*time.Second)
-	home, _ := os.UserHomeDir()
-	if home != "" {
-		s.globalConfigPaths = append(s.globalConfigPaths,
-			filepath.Join(home, ".claude", "settings.json"),
-		)
-	}
-	s.globalConfigPaths = append(s.globalConfigPaths,
-		filepath.Join("/Library", "Application Support", "ClaudeCode", "managed-settings.json"),
-	)
-	return s
 }
 
 // Scan performs a single scan cycle: discovers Claude Code processes,

@@ -14,8 +14,8 @@ import (
 
 // testNotifier records all notifications for test assertions.
 type testNotifier struct {
-	mu      sync.Mutex
-	alerts  []Alert
+	mu     sync.Mutex
+	alerts []Alert
 }
 
 func newTestNotifier() *testNotifier {
@@ -535,53 +535,6 @@ func TestAlertEngine_WithStateStore(t *testing.T) {
 	engine.EvaluateAt(now.Add(200 * time.Millisecond))
 	if len(engine.Alerts()) <= prevCount {
 		t.Log("alert re-fired after dedup TTL expired (expected behavior)")
-	}
-}
-
-func TestAlertNotification_OSAScript(t *testing.T) {
-	// Test the notifier interface and AppleScript string escaping.
-	// We don't actually run osascript in tests to avoid UI popups.
-	notifier := NewOSAScriptNotifier(false) // disabled = no-op
-
-	alert := Alert{
-		Rule:      RuleCostSurge,
-		Severity:  SeverityCritical,
-		Message:   `Cost surge: $5.00/hr exceeds threshold $2.00/hr with "special" chars`,
-		SessionID: "sess-notification-test-1234567890",
-		FiredAt:   time.Now(),
-	}
-
-	// Should not panic even with special characters.
-	notifier.Notify(alert)
-
-	// Test escaping function.
-	escaped := escapeAppleScript(`He said "hello" and \n stuff`)
-	expected := `He said \"hello\" and \\n stuff`
-	if escaped != expected {
-		t.Errorf("escapeAppleScript: expected %q, got %q", expected, escaped)
-	}
-
-	// Test session ID truncation.
-	truncated := truncateSessionID("sess-1234567890abcdef")
-	if len(truncated) > 16 {
-		t.Errorf("expected truncated session ID, got %q", truncated)
-	}
-
-	short := truncateSessionID("sess-123")
-	if short != "sess-123" {
-		t.Errorf("short session ID should not be truncated, got %q", short)
-	}
-
-	// Test with enabled notifier (will attempt osascript but that's fine in CI).
-	enabledNotifier := NewOSAScriptNotifier(true)
-	if enabledNotifier.enabled != true {
-		t.Error("expected notifier to be enabled")
-	}
-
-	// Verify the constructor works correctly.
-	disabledNotifier := NewOSAScriptNotifier(false)
-	if disabledNotifier.enabled != false {
-		t.Error("expected notifier to be disabled")
 	}
 }
 

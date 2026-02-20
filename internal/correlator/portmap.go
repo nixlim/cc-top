@@ -1,5 +1,3 @@
-//go:build darwin
-
 package correlator
 
 import (
@@ -12,7 +10,7 @@ type scannerPortMapper struct {
 }
 
 // NewScannerPortMapper creates a PortMapper that uses the scanner's ProcessAPI
-// to query open sockets via proc_pidfdinfo on macOS.
+// to query open sockets for a given PID.
 func NewScannerPortMapper(api scanner.ProcessAPI) PortMapper {
 	return &scannerPortMapper{api: api}
 }

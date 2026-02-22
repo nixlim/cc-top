@@ -4,6 +4,8 @@ Real-time terminal monitoring for Claude Code sessions.
 
 cc-top is a TUI application that monitors Claude Code sessions via OpenTelemetry telemetry. It tracks costs, tokens, API performance, tool usage, and fires alerts on anomalies — all in a live-updating terminal dashboard.
 
+![cc-top demo](cc-top-demo-1502260014.gif)
+
 ## Quick start
 
 ```bash

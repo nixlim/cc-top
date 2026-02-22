@@ -168,8 +168,9 @@ type Model struct {
 	settings SettingsWriter
 	history  HistoryProvider
 
-	selectedSession string
-	sessionCursor   int
+	selectedSession    string
+	sessionCursor      int
+	sessionScrollOffset int
 
 	eventScrollPos int
 	autoScroll     bool
@@ -429,6 +430,9 @@ func (m Model) handleSessionsPanelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Up):
 		if m.sessionCursor > 0 {
 			m.sessionCursor--
+			if m.sessionCursor < m.sessionScrollOffset {
+				m.sessionScrollOffset = m.sessionCursor
+			}
 		}
 		return m, nil
 
@@ -436,6 +440,13 @@ func (m Model) handleSessionsPanelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		sessions := m.getSessions()
 		if m.sessionCursor < len(sessions)-1 {
 			m.sessionCursor++
+			// Adjust scroll offset when cursor goes below visible area.
+			dims := computeDimensions(m.width, m.height)
+			contentH := dims.sessionListH - 4
+			visibleRows := contentH - 3 // title + header + separator
+			if visibleRows > 0 && m.sessionCursor >= m.sessionScrollOffset+visibleRows {
+				m.sessionScrollOffset = m.sessionCursor - visibleRows + 1
+			}
 		}
 		return m, nil
 
@@ -655,21 +666,21 @@ func (m Model) handleHistoryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.historyCursor = 0
 			m.historyScrollPos = 0
 			return m, nil
-		case 'd':
+		case 'd', 'D':
 			if m.historySection != 3 {
 				m.historyGranularity = "daily"
 				m.historyCursor = 0
 				m.historyScrollPos = 0
 			}
 			return m, nil
-		case 'w':
+		case 'w', 'W':
 			if m.historySection != 3 {
 				m.historyGranularity = "weekly"
 				m.historyCursor = 0
 				m.historyScrollPos = 0
 			}
 			return m, nil
-		case 'm':
+		case 'm', 'M':
 			if m.historySection != 3 {
 				m.historyGranularity = "monthly"
 				m.historyCursor = 0

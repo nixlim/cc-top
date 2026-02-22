@@ -73,8 +73,8 @@ func (m Model) renderHistoryHeader() string {
 	var tabParts []string
 	for i, t := range tabs {
 		label := fmt.Sprintf("[%s] %s", t.key, t.label)
-		if i == m.historySection {
-			label = selectedStyle.Render(label)
+		if i != m.historySection {
+			label = dimStyle.Render(label)
 		}
 		tabParts = append(tabParts, label)
 	}
@@ -96,8 +96,8 @@ func (m Model) renderHistoryHeader() string {
 		var gParts []string
 		for _, g := range granularities {
 			label := fmt.Sprintf("[%s]%s", g.key, g.label)
-			if m.historyGranularity == g.value {
-				label = selectedStyle.Render(label)
+			if m.historyGranularity != g.value {
+				label = dimStyle.Render(label)
 			}
 			gParts = append(gParts, label)
 		}

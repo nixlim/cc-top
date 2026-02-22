@@ -238,6 +238,9 @@ func TestHistoryGranularity_AllModes(t *testing.T) {
 		{"w", "weekly"},
 		{"m", "monthly"},
 		{"d", "daily"}, // back to daily
+		{"W", "weekly"},  // uppercase
+		{"M", "monthly"}, // uppercase
+		{"D", "daily"},   // uppercase
 	}
 	for _, tt := range tests {
 		m = sendKey(m, tt.key)

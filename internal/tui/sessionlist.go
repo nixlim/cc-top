@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -56,6 +57,11 @@ func (m Model) renderSessionListPanel(w, h int) string {
 	// Sort sessions: telemetry-enabled first, then non-telemetry greyed out.
 	telemetrySessions, noTelemetrySessions := splitSessionsByTelemetry(sessions)
 
+	// Limit done/exited sessions to most recent 5 per group.
+	const maxDone = 5
+	telemetrySessions, telHidden := filterDoneSessions(telemetrySessions, maxDone)
+	noTelemetrySessions, noTelHidden := filterDoneSessions(noTelemetrySessions, maxDone)
+
 	rowIdx := 0
 	// Render telemetry-enabled sessions.
 	for _, s := range telemetrySessions {
@@ -67,6 +73,10 @@ func (m Model) renderSessionListPanel(w, h int) string {
 		}
 		lines = append(lines, line)
 		rowIdx++
+	}
+
+	if telHidden > 0 {
+		lines = append(lines, dimStyle.Render(fmt.Sprintf("── +%d done sessions hidden ──", telHidden)))
 	}
 
 	// Render non-telemetry sessions greyed out at bottom.
@@ -82,10 +92,32 @@ func (m Model) renderSessionListPanel(w, h int) string {
 			lines = append(lines, line)
 			rowIdx++
 		}
+		if noTelHidden > 0 {
+			lines = append(lines, dimStyle.Render(fmt.Sprintf("── +%d done sessions hidden ──", noTelHidden)))
+		}
 	}
 
-	// Truncate to fit available height.
-	if len(lines) > contentH {
+	// Scroll viewport: keep header lines fixed, scroll data lines.
+	headerCount := 3 // title + column header + separator
+	if len(lines) > headerCount {
+		dataLines := lines[headerCount:]
+		visibleRows := contentH - headerCount
+		if visibleRows > 0 && len(dataLines) > visibleRows {
+			offset := m.sessionScrollOffset
+			if offset < 0 {
+				offset = 0
+			}
+			maxOffset := len(dataLines) - visibleRows
+			if offset > maxOffset {
+				offset = maxOffset
+			}
+			end := offset + visibleRows
+			if end > len(dataLines) {
+				end = len(dataLines)
+			}
+			lines = append(lines[:headerCount], dataLines[offset:end]...)
+		}
+	} else if len(lines) > contentH {
 		lines = lines[:contentH]
 	}
 
@@ -96,25 +128,21 @@ func (m Model) renderSessionListPanel(w, h int) string {
 // formatSessionHeader returns the column header string.
 func formatSessionHeader(maxW int) string {
 	if maxW >= 90 {
-		return fmt.Sprintf("%-6s %-8s %-8s %-15s %-6s %-8s %-5s %-8s %-6s",
-			"PID", "Session", "Term", "CWD", "Model", "Status", "Cost", "Tokens", "Time")
+		return fmt.Sprintf("%-8s %-9s %-8s %-15s %-6s %-8s %-5s %-8s %-6s",
+			"Session", "Started", "Term", "CWD", "Model", "Status", "Cost", "Tokens", "Time")
 	}
 	if maxW >= 60 {
-		return fmt.Sprintf("%-6s %-8s %-8s %-12s %-6s %-5s",
-			"PID", "Session", "Term", "CWD", "Status", "Cost")
+		return fmt.Sprintf("%-8s %-9s %-8s %-12s %-6s %-5s",
+			"Session", "Started", "Term", "CWD", "Status", "Cost")
 	}
-	return fmt.Sprintf("%-6s %-8s %-6s %-5s",
-		"PID", "Session", "Status", "Cost")
+	return fmt.Sprintf("%-8s %-9s %-6s %-5s",
+		"Session", "Started", "Status", "Cost")
 }
 
 // formatSessionRow formats a single session row based on available width.
 func formatSessionRow(s *state.SessionData, maxW int) string {
-	pid := "—"
-	if s.PID > 0 {
-		pid = fmt.Sprintf("%d", s.PID)
-	}
-
 	sessionID := truncateID(s.SessionID, 8)
+	started := formatStartedAt(s.StartedAt)
 	terminal := truncateStr(s.Terminal, 8)
 	cwd := truncateCWD(s.CWD, 15)
 	model := truncateStr(s.Model, 6)
@@ -124,15 +152,23 @@ func formatSessionRow(s *state.SessionData, maxW int) string {
 	activeTime := formatDuration(s.ActiveTime)
 
 	if maxW >= 90 {
-		return fmt.Sprintf("%-6s %-8s %-8s %-15s %-6s %-8s %5s %8s %6s",
-			pid, sessionID, terminal, cwd, model, statusStr, cost, tokens, activeTime)
+		return fmt.Sprintf("%-8s %-9s %-8s %-15s %-6s %-8s %5s %8s %6s",
+			sessionID, started, terminal, cwd, model, statusStr, cost, tokens, activeTime)
 	}
 	if maxW >= 60 {
-		return fmt.Sprintf("%-6s %-8s %-8s %-12s %-6s %5s",
-			pid, sessionID, terminal, truncateCWD(s.CWD, 12), statusStr, cost)
+		return fmt.Sprintf("%-8s %-9s %-8s %-12s %-6s %5s",
+			sessionID, started, terminal, truncateCWD(s.CWD, 12), statusStr, cost)
 	}
-	return fmt.Sprintf("%-6s %-8s %-6s %5s",
-		pid, sessionID, statusStr, cost)
+	return fmt.Sprintf("%-8s %-9s %-6s %5s",
+		sessionID, started, statusStr, cost)
+}
+
+// formatStartedAt formats a timestamp as DDMMHHMM (day, month, hour, minute).
+func formatStartedAt(t time.Time) string {
+	if t.IsZero() {
+		return "—"
+	}
+	return t.Format("0201 1504")
 }
 
 // renderStatus returns a styled string for the session status.
@@ -226,6 +262,53 @@ func splitSessionsByTelemetry(sessions []state.SessionData) (withTelemetry, with
 // hasTelemetry returns true if a session has received any telemetry data.
 func hasTelemetry(s *state.SessionData) bool {
 	return len(s.Metrics) > 0 || len(s.Events) > 0 || !s.LastEventAt.IsZero()
+}
+
+// filterDoneSessions keeps all active/idle sessions and limits done/exited
+// sessions to the most recent maxDone (by LastEventAt). Returns the filtered
+// list preserving original order and the count of hidden done sessions.
+func filterDoneSessions(sessions []state.SessionData, maxDone int) ([]state.SessionData, int) {
+	var active, done []state.SessionData
+	for _, s := range sessions {
+		status := s.Status()
+		if status == state.StatusDone || status == state.StatusExited {
+			done = append(done, s)
+		} else {
+			active = append(active, s)
+		}
+	}
+
+	if len(done) <= maxDone {
+		return sessions, 0
+	}
+
+	// Sort done sessions by LastEventAt descending to keep most recent.
+	sort.Slice(done, func(i, j int) bool {
+		return done[i].LastEventAt.After(done[j].LastEventAt)
+	})
+	hiddenCount := len(done) - maxDone
+	keptDone := done[:maxDone]
+
+	// Build a set of kept done session IDs for fast lookup.
+	kept := make(map[string]bool, maxDone)
+	for _, s := range keptDone {
+		kept[s.SessionID] = true
+	}
+
+	// Rebuild the list preserving original order.
+	var result []state.SessionData
+	for _, s := range sessions {
+		status := s.Status()
+		if status == state.StatusDone || status == state.StatusExited {
+			if kept[s.SessionID] {
+				result = append(result, s)
+			}
+		} else {
+			result = append(result, s)
+		}
+	}
+
+	return result, hiddenCount
 }
 
 // min returns the smaller of two ints.

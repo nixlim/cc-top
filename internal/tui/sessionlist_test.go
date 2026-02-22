@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -188,8 +189,8 @@ func TestRenderSessionListPanel_WithSessions(t *testing.T) {
 	if !strings.Contains(panel, "Sessions") {
 		t.Error("session list should contain 'Sessions' title")
 	}
-	if !strings.Contains(panel, "1234") {
-		t.Error("session list should contain PID 1234")
+	if !strings.Contains(panel, "sess-001") {
+		t.Error("session list should contain session ID")
 	}
 }
 
@@ -252,14 +253,164 @@ func TestFormatSessionRow_Widths(t *testing.T) {
 	}
 }
 
-func TestFormatSessionRow_NoPID(t *testing.T) {
+func TestFormatSessionRow_StartedAt(t *testing.T) {
+	started := time.Date(2026, 2, 22, 14, 5, 0, 0, time.Local)
 	s := &state.SessionData{
 		SessionID: "sess-001",
-		PID:       0,
+		StartedAt: started,
+	}
+
+	row := formatSessionRow(s, 100)
+	// DDMM HHMM → "2202 1405"
+	if !strings.Contains(row, "2202 1405") {
+		t.Errorf("row should contain started timestamp '2202 1405', got: %s", row)
+	}
+}
+
+func TestFormatSessionRow_NoStartedAt(t *testing.T) {
+	s := &state.SessionData{
+		SessionID: "sess-001",
 	}
 
 	row := formatSessionRow(s, 100)
 	if !strings.Contains(row, "\u2014") { // em dash
-		t.Error("session with PID 0 should show em-dash")
+		t.Error("session with zero StartedAt should show em-dash")
+	}
+}
+
+func TestFilterDoneSessions_FewerThanMax(t *testing.T) {
+	sessions := []state.SessionData{
+		{SessionID: "active-1", LastEventAt: time.Now()},
+		{SessionID: "done-1", Exited: true},
+		{SessionID: "done-2", Exited: true},
+	}
+
+	filtered, hidden := filterDoneSessions(sessions, 5)
+	if hidden != 0 {
+		t.Errorf("hiddenCount = %d, want 0", hidden)
+	}
+	if len(filtered) != 3 {
+		t.Errorf("filtered count = %d, want 3", len(filtered))
+	}
+}
+
+func TestFilterDoneSessions_ExactlyMax(t *testing.T) {
+	sessions := []state.SessionData{
+		{SessionID: "active-1", LastEventAt: time.Now()},
+		{SessionID: "done-1", Exited: true},
+		{SessionID: "done-2", Exited: true},
+		{SessionID: "done-3", Exited: true},
+		{SessionID: "done-4", Exited: true},
+		{SessionID: "done-5", Exited: true},
+	}
+
+	filtered, hidden := filterDoneSessions(sessions, 5)
+	if hidden != 0 {
+		t.Errorf("hiddenCount = %d, want 0", hidden)
+	}
+	if len(filtered) != 6 {
+		t.Errorf("filtered count = %d, want 6", len(filtered))
+	}
+}
+
+func TestFilterDoneSessions_MoreThanMax(t *testing.T) {
+	now := time.Now()
+	sessions := []state.SessionData{
+		{SessionID: "active-1", LastEventAt: now},                              // active
+		{SessionID: "done-1", Exited: true, LastEventAt: now.Add(-7 * time.Hour)},  // oldest done
+		{SessionID: "done-2", Exited: true, LastEventAt: now.Add(-6 * time.Hour)},
+		{SessionID: "done-3", Exited: true, LastEventAt: now.Add(-5 * time.Hour)},
+		{SessionID: "done-4", Exited: true, LastEventAt: now.Add(-4 * time.Hour)},
+		{SessionID: "done-5", Exited: true, LastEventAt: now.Add(-3 * time.Hour)},
+		{SessionID: "done-6", Exited: true, LastEventAt: now.Add(-2 * time.Hour)},
+		{SessionID: "done-7", Exited: true, LastEventAt: now.Add(-1 * time.Hour)},  // newest done
+	}
+
+	filtered, hidden := filterDoneSessions(sessions, 5)
+	if hidden != 2 {
+		t.Errorf("hiddenCount = %d, want 2", hidden)
+	}
+	// 1 active + 5 kept done = 6.
+	if len(filtered) != 6 {
+		t.Errorf("filtered count = %d, want 6", len(filtered))
+	}
+
+	// Active session must still be present.
+	foundActive := false
+	for _, s := range filtered {
+		if s.SessionID == "active-1" {
+			foundActive = true
+		}
+	}
+	if !foundActive {
+		t.Error("active session should always be kept")
+	}
+
+	// The two oldest done sessions (done-1, done-2) should be removed.
+	for _, s := range filtered {
+		if s.SessionID == "done-1" || s.SessionID == "done-2" {
+			t.Errorf("session %s should have been filtered out (oldest done)", s.SessionID)
+		}
+	}
+}
+
+func TestFilterDoneSessions_PreservesOrder(t *testing.T) {
+	now := time.Now()
+	sessions := []state.SessionData{
+		{SessionID: "done-3", Exited: true, LastEventAt: now.Add(-1 * time.Hour)},
+		{SessionID: "active-1", LastEventAt: now},
+		{SessionID: "done-2", Exited: true, LastEventAt: now.Add(-2 * time.Hour)},
+		{SessionID: "done-1", Exited: true, LastEventAt: now.Add(-3 * time.Hour)},
+	}
+
+	filtered, hidden := filterDoneSessions(sessions, 2)
+	if hidden != 1 {
+		t.Errorf("hiddenCount = %d, want 1", hidden)
+	}
+
+	// Original order among kept sessions should be preserved.
+	var ids []string
+	for _, s := range filtered {
+		ids = append(ids, s.SessionID)
+	}
+	expected := []string{"done-3", "active-1", "done-2"}
+	if len(ids) != len(expected) {
+		t.Fatalf("filtered IDs = %v, want %v", ids, expected)
+	}
+	for i, id := range ids {
+		if id != expected[i] {
+			t.Errorf("filtered[%d] = %q, want %q", i, id, expected[i])
+		}
+	}
+}
+
+func TestRenderSessionListPanel_HiddenCountIndicator(t *testing.T) {
+	now := time.Now()
+	sessions := make([]state.SessionData, 0, 8)
+	// 1 active session.
+	sessions = append(sessions, state.SessionData{
+		SessionID:   "active-1",
+		PID:         1,
+		LastEventAt: now,
+	})
+	// 7 done sessions (exited) — only 5 should be kept.
+	for i := 0; i < 7; i++ {
+		sessions = append(sessions, state.SessionData{
+			SessionID:   fmt.Sprintf("done-%d", i),
+			PID:         100 + i,
+			Exited:      true,
+			LastEventAt: now.Add(-time.Duration(i) * time.Hour),
+		})
+	}
+
+	cfg := config.DefaultConfig()
+	mockState := &mockStateProvider{sessions: sessions}
+	m := NewModel(cfg, WithStateProvider(mockState), WithStartView(ViewDashboard))
+	m.width = 120
+	m.height = 40
+
+	panel := m.renderSessionListPanel(48, 30)
+	if !strings.Contains(panel, "+2 done sessions hidden") {
+		t.Error("panel should show '+2 done sessions hidden' indicator")
 	}
 }

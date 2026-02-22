@@ -50,6 +50,11 @@ func (d defaultNormalizer) Normalize(command string) string {
 	return NormalizeCommand(command)
 }
 
+// AlertPersister persists fired alerts to durable storage.
+type AlertPersister interface {
+	PersistAlert(alert Alert)
+}
+
 // Notifier sends alert notifications via platform-specific mechanisms.
 type Notifier interface {
 	// Notify sends an alert notification. Implementations must be non-blocking.

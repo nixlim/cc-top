@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -46,10 +48,15 @@ func main() {
 		fmt.Fprintf(os.Stderr, "cc-top: config warning: %s\n", w)
 	}
 
-	store, isPersistent, err := storage.NewStore(cfg.Storage)
+	storeIface, isPersistent, err := storage.NewStore(cfg.Storage)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cc-top: storage error: %v\n", err)
 		os.Exit(1)
+	}
+	store := storeIface
+	var sqliteStore *storage.SQLiteStore
+	if isPersistent {
+		sqliteStore = storeIface.(*storage.SQLiteStore)
 	}
 
 	proc := scanner.NewDefaultScanner(cfg.Scanner.IntervalSeconds)
@@ -83,7 +90,12 @@ func main() {
 	})
 
 	notifier := alerts.NewOSAScriptNotifier(cfg.Alerts.Notifications.SystemNotify)
-	alertEngine := alerts.NewEngine(store, cfg, brCalc, alerts.WithNotifier(notifier))
+	var alertOpts []alerts.EngineOption
+	alertOpts = append(alertOpts, alerts.WithNotifier(notifier))
+	if sqliteStore != nil {
+		alertOpts = append(alertOpts, alerts.WithPersister(sqliteStore))
+	}
+	alertEngine := alerts.NewEngine(store, cfg, brCalc, alertOpts...)
 
 	statsCalc := stats.NewCalculator(cfg.Pricing)
 
@@ -114,7 +126,17 @@ func main() {
 
 	alertEngine.Start(ctx)
 
-	model := tui.NewModel(cfg,
+	if sqliteStore != nil {
+		sqliteStore.SetStatsSnapshotFunc(func() stats.DashboardStats {
+			return statsCalc.Compute(store.ListSessions())
+		})
+		sqliteStore.SetBurnRateSnapshotFunc(func() burnrate.BurnRate {
+			return brCalc.Compute(store)
+		})
+		sqliteStore.StartBurnRateSnapshots()
+	}
+
+	modelOpts := []tui.ModelOption{
 		tui.WithStateProvider(store),
 		tui.WithScannerProvider(&scannerAdapter{scanner: proc, cfg: cfg, store: store}),
 		tui.WithBurnRateProvider(&burnRateAdapter{calc: brCalc, store: store}),
@@ -128,7 +150,12 @@ func main() {
 			_ = shutdownMgr.Shutdown()
 			_ = store.Close()
 		}),
-	)
+	}
+	if sqliteStore != nil {
+		modelOpts = append(modelOpts, tui.WithHistoryProvider(&historyAdapter{store: sqliteStore}))
+	}
+
+	model := tui.NewModel(cfg, modelOpts...)
 
 	p := tea.NewProgram(model,
 		tea.WithAltScreen(),
@@ -254,4 +281,113 @@ func (a *statsAdapter) Get(sessionID string) stats.DashboardStats {
 
 func (a *statsAdapter) GetGlobal() stats.DashboardStats {
 	return a.calc.Compute(a.store.ListSessions())
+}
+
+type historyAdapter struct {
+	store *storage.SQLiteStore
+}
+
+func (a *historyAdapter) QueryDailyStats(days int) []tui.DailyStatsRow {
+	rows := a.store.QueryDailyStats(days)
+	result := make([]tui.DailyStatsRow, len(rows))
+	for i, r := range rows {
+		result[i] = tui.DailyStatsRow{
+			Date:              r.Date,
+			TotalCost:         r.TotalCost,
+			TokenInput:        r.TokenInput,
+			TokenOutput:       r.TokenOutput,
+			TokenCacheRead:    r.TokenCacheRead,
+			TokenCacheWrite:   r.TokenCacheWrite,
+			SessionCount:      r.SessionCount,
+			APIRequests:       r.APIRequests,
+			APIErrors:         r.APIErrors,
+			LinesAdded:        r.LinesAdded,
+			LinesRemoved:      r.LinesRemoved,
+			Commits:           r.Commits,
+			PRsOpened:         r.PRsOpened,
+			CacheEfficiency:   r.CacheEfficiency,
+			CacheSavingsUSD:   r.CacheSavingsUSD,
+			ErrorRate:         r.ErrorRate,
+			RetryRate:         r.RetryRate,
+			AvgAPILatency:     r.AvgAPILatency,
+			LatencyP50:        r.LatencyP50,
+			LatencyP95:        r.LatencyP95,
+			LatencyP99:        r.LatencyP99,
+			IsLegacy:          r.Date != "" && r.ModelBreakdown == "" && r.TopTools == "",
+		}
+		// Parse JSON fields
+		if r.ModelBreakdown != "" {
+			_ = json.Unmarshal([]byte(r.ModelBreakdown), &result[i].ModelBreakdown)
+		}
+		if r.TopTools != "" {
+			_ = json.Unmarshal([]byte(r.TopTools), &result[i].TopTools)
+		}
+		if r.ErrorCategories != "" {
+			_ = json.Unmarshal([]byte(r.ErrorCategories), &result[i].ErrorCategories)
+		}
+		if r.LanguageBreakdown != "" {
+			_ = json.Unmarshal([]byte(r.LanguageBreakdown), &result[i].LanguageBreakdown)
+		}
+		if r.DecisionSources != "" {
+			_ = json.Unmarshal([]byte(r.DecisionSources), &result[i].DecisionSources)
+		}
+		if r.MCPToolUsage != "" {
+			_ = json.Unmarshal([]byte(r.MCPToolUsage), &result[i].MCPToolUsage)
+		}
+	}
+	return result
+}
+
+func (a *historyAdapter) QueryBurnRateDailySummary(days int) []tui.BurnRateDailySummary {
+	rows := a.store.QueryBurnRateDailySummary(days)
+	result := make([]tui.BurnRateDailySummary, len(rows))
+	for i, r := range rows {
+		result[i] = tui.BurnRateDailySummary{
+			Date:              r.Date,
+			AvgHourlyRate:     r.AvgHourlyRate,
+			PeakHourlyRate:    r.MaxHourlyRate,
+			AvgTokenVelocity:  r.AvgTokenVelocity,
+			DailyProjection:   r.AvgDailyProjection,
+			MonthlyProjection: r.AvgMonthlyProjection,
+			SnapshotCount:     r.SnapshotCount,
+		}
+	}
+	return result
+}
+
+func (a *historyAdapter) QueryBurnRateSnapshots(date string) []tui.BurnRateSnapshotRow {
+	rows := a.store.QueryBurnRateSnapshotsForDate(date)
+	result := make([]tui.BurnRateSnapshotRow, len(rows))
+	for i, r := range rows {
+		ts, _ := time.Parse(time.RFC3339, r.Timestamp)
+		result[i] = tui.BurnRateSnapshotRow{
+			Timestamp:         ts,
+			TotalCost:         r.TotalCost,
+			HourlyRate:        r.HourlyRate,
+			Trend:             burnrate.TrendDirection(r.Trend),
+			TokenVelocity:     r.TokenVelocity,
+			DailyProjection:   r.DailyProjection,
+			MonthlyProjection: r.MonthlyProjection,
+		}
+		if r.PerModel != "" {
+			_ = json.Unmarshal([]byte(r.PerModel), &result[i].PerModel)
+		}
+	}
+	return result
+}
+
+func (a *historyAdapter) QueryAlertHistory(days int, ruleFilter string) []tui.AlertHistoryRow {
+	rows := a.store.QueryAlertHistory(days, ruleFilter)
+	result := make([]tui.AlertHistoryRow, len(rows))
+	for i, r := range rows {
+		firedAt, _ := time.Parse(time.RFC3339, r.FiredAt)
+		result[i] = tui.AlertHistoryRow{
+			Rule:      r.Rule,
+			Severity:  r.Severity,
+			Message:   r.Message,
+			SessionID: r.SessionID,
+			FiredAt:   firedAt,
+		}
+	}
+	return result
 }

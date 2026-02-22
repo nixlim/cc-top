@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
 
 func OpenDB(dbPath string) (*sql.DB, error) {
 	parentDir := filepath.Dir(dbPath)
@@ -30,6 +30,11 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("enabling foreign keys: %w", err)
+	}
+
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("setting busy_timeout: %w", err)
 	}
 
 	if err := migrateSchema(db, dbPath); err != nil {
@@ -78,6 +83,13 @@ func applyMigrations(db *sql.DB, fromVersion int) error {
 	if fromVersion == 0 {
 		if err := migrateV0ToV1(db); err != nil {
 			return fmt.Errorf("migration v0→v1: %w", err)
+		}
+		fromVersion = 1
+	}
+
+	if fromVersion == 1 {
+		if err := migrateV1ToV2(db); err != nil {
+			return fmt.Errorf("migration v1→v2: %w", err)
 		}
 	}
 
@@ -223,6 +235,106 @@ func migrateV0ToV1(db *sql.DB) error {
 	_, err = tx.Exec("CREATE INDEX IF NOT EXISTS idx_daily_date ON daily_summaries(date)")
 	if err != nil {
 		return fmt.Errorf("creating idx_daily_date: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
+	}
+
+	return nil
+}
+
+func migrateV1ToV2(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("starting transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.Exec(`
+		CREATE TABLE IF NOT EXISTS daily_stats (
+			date TEXT PRIMARY KEY,
+			total_cost REAL DEFAULT 0,
+			token_input INTEGER DEFAULT 0,
+			token_output INTEGER DEFAULT 0,
+			token_cache_read INTEGER DEFAULT 0,
+			token_cache_write INTEGER DEFAULT 0,
+			session_count INTEGER DEFAULT 0,
+			api_requests INTEGER DEFAULT 0,
+			api_errors INTEGER DEFAULT 0,
+			lines_added INTEGER DEFAULT 0,
+			lines_removed INTEGER DEFAULT 0,
+			commits INTEGER DEFAULT 0,
+			prs_opened INTEGER DEFAULT 0,
+			cache_efficiency REAL DEFAULT 0,
+			cache_savings_usd REAL DEFAULT 0,
+			error_rate REAL DEFAULT 0,
+			retry_rate REAL DEFAULT 0,
+			avg_api_latency_ms REAL DEFAULT 0,
+			latency_p50_ms REAL DEFAULT 0,
+			latency_p95_ms REAL DEFAULT 0,
+			latency_p99_ms REAL DEFAULT 0,
+			model_breakdown TEXT,
+			top_tools TEXT,
+			error_categories TEXT,
+			language_breakdown TEXT,
+			decision_sources TEXT,
+			mcp_tool_usage TEXT
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("creating daily_stats table: %w", err)
+	}
+
+	_, err = tx.Exec(`
+		CREATE TABLE IF NOT EXISTS burn_rate_snapshots (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			timestamp TEXT NOT NULL,
+			total_cost REAL DEFAULT 0,
+			hourly_rate REAL DEFAULT 0,
+			trend INTEGER DEFAULT 0,
+			token_velocity REAL DEFAULT 0,
+			daily_projection REAL DEFAULT 0,
+			monthly_projection REAL DEFAULT 0,
+			per_model TEXT
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("creating burn_rate_snapshots table: %w", err)
+	}
+
+	_, err = tx.Exec("CREATE INDEX IF NOT EXISTS idx_burnrate_ts ON burn_rate_snapshots(timestamp)")
+	if err != nil {
+		return fmt.Errorf("creating idx_burnrate_ts: %w", err)
+	}
+
+	_, err = tx.Exec(`
+		CREATE TABLE IF NOT EXISTS alert_history (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			rule TEXT NOT NULL,
+			severity TEXT NOT NULL,
+			message TEXT NOT NULL,
+			session_id TEXT DEFAULT '',
+			fired_at TEXT NOT NULL
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("creating alert_history table: %w", err)
+	}
+
+	_, err = tx.Exec("CREATE INDEX IF NOT EXISTS idx_alert_history_fired ON alert_history(fired_at)")
+	if err != nil {
+		return fmt.Errorf("creating idx_alert_history_fired: %w", err)
+	}
+
+	_, err = tx.Exec("CREATE INDEX IF NOT EXISTS idx_alert_history_rule ON alert_history(rule)")
+	if err != nil {
+		return fmt.Errorf("creating idx_alert_history_rule: %w", err)
+	}
+
+	_, err = tx.Exec("UPDATE schema_version SET version = 2")
+	if err != nil {
+		return fmt.Errorf("updating schema version: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {

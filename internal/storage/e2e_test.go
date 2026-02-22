@@ -6,7 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nixlim/cc-top/internal/alerts"
+	"github.com/nixlim/cc-top/internal/burnrate"
 	"github.com/nixlim/cc-top/internal/state"
+	"github.com/nixlim/cc-top/internal/stats"
 )
 
 func TestFullLifecycle_IngestShutdownRestart(t *testing.T) {
@@ -239,4 +242,221 @@ func TestFullLifecycle_MaintenanceCycle(t *testing.T) {
 	}
 
 	_ = store.Close()
+}
+
+// TestFullLifecycle_PersistAndRecover verifies that daily stats, burn rate snapshots,
+// and alert history survive a close/reopen cycle and are queryable (spec test #53).
+func TestFullLifecycle_PersistAndRecover(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "persist-recover.db")
+
+	// Phase 1: Create store and write data.
+	store1, err := NewSQLiteStore(dbPath, 7, 90)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore (phase 1): %v", err)
+	}
+
+	today := time.Now().Format("2006-01-02")
+
+	// Write daily stats via the public API.
+	store1.WriteDailyStats(today, stats.DashboardStats{
+		LinesAdded:   42,
+		LinesRemoved: 10,
+		Commits:      3,
+		PRs:          1,
+		CacheEfficiency: 0.85,
+		AvgAPILatency:   1.2,
+		ErrorRate:        0.02,
+		RetryRate:        0.01,
+		CacheSavingsUSD:  0.55,
+		ModelBreakdown: []stats.ModelStats{
+			{Model: "claude-opus-4", TotalCost: 5.00, TotalTokens: 50000},
+		},
+		TopTools: []stats.ToolUsage{
+			{ToolName: "Read", Count: 20},
+		},
+		ErrorCategories:   map[string]int{"rate_limit": 2},
+		LanguageBreakdown: map[string]int{"go": 15},
+		DecisionSources:   map[string]int{"user": 5},
+		MCPToolUsage:      map[string]int{"pal:chat": 3},
+		LatencyPercentiles: stats.LatencyPercentiles{
+			P50: 0.8,
+			P95: 2.5,
+			P99: 4.0,
+		},
+		TokenBreakdown: map[string]int64{
+			"input":         30000,
+			"output":        15000,
+			"cacheRead":     5000,
+			"cacheCreation": 2000,
+		},
+	})
+
+	// Write burn rate snapshot.
+	store1.WriteBurnRateSnapshot(burnrate.BurnRate{
+		TotalCost:         12.50,
+		HourlyRate:        2.10,
+		Trend:             burnrate.TrendUp,
+		TokenVelocity:     500.0,
+		DailyProjection:   50.40,
+		MonthlyProjection: 1512.00,
+		PerModel: []burnrate.ModelBurnRate{
+			{Model: "claude-opus-4", HourlyRate: 2.10, TotalCost: 12.50},
+		},
+	})
+
+	// Write alert history.
+	store1.PersistAlert(alerts.Alert{
+		Rule:      "CostSurge",
+		Severity:  "critical",
+		Message:   "Cost exceeded $10/hr",
+		SessionID: "sess-test-1",
+		FiredAt:   time.Now(),
+	})
+
+	// Write some raw metrics/events to verify those survive too.
+	store1.AddMetric("sess-test-1", state.Metric{
+		Name:      "claude_code.cost.usage",
+		Value:     7.25,
+		Timestamp: time.Now(),
+	})
+	store1.AddEvent("sess-test-1", state.Event{
+		Name:      "claude_code.api_request",
+		Timestamp: time.Now(),
+		Attributes: map[string]string{
+			"model": "claude-opus-4",
+		},
+	})
+	store1.UpdatePID("sess-test-1", 99999)
+
+	// Allow async writes to flush.
+	time.Sleep(300 * time.Millisecond)
+
+	// Close store (triggers final flush + daily summaries).
+	if err := store1.Close(); err != nil {
+		t.Fatalf("Close (phase 1): %v", err)
+	}
+
+	// Phase 2: Reopen and verify all data is queryable.
+	store2, err := NewSQLiteStore(dbPath, 7, 90)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore (phase 2): %v", err)
+	}
+	defer func() { _ = store2.Close() }()
+
+	// Verify daily stats query.
+	dailyStats := store2.QueryDailyStats(7)
+	if len(dailyStats) == 0 {
+		t.Fatal("QueryDailyStats returned no rows after reopen")
+	}
+	found := false
+	for _, ds := range dailyStats {
+		if ds.Date == today {
+			found = true
+			if ds.LinesAdded != 42 {
+				t.Errorf("LinesAdded: want 42, got %d", ds.LinesAdded)
+			}
+			if ds.Commits != 3 {
+				t.Errorf("Commits: want 3, got %d", ds.Commits)
+			}
+			if ds.PRsOpened != 1 {
+				t.Errorf("PRsOpened: want 1, got %d", ds.PRsOpened)
+			}
+			if ds.ModelBreakdown == "" {
+				t.Error("ModelBreakdown JSON is empty")
+			}
+			if ds.TopTools == "" {
+				t.Error("TopTools JSON is empty")
+			}
+			if ds.ErrorCategories == "" {
+				t.Error("ErrorCategories JSON is empty")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("QueryDailyStats did not return today's date %s", today)
+	}
+
+	// Verify burn rate daily summary.
+	brSummary := store2.QueryBurnRateDailySummary(7)
+	if len(brSummary) == 0 {
+		t.Fatal("QueryBurnRateDailySummary returned no rows after reopen")
+	}
+	brFound := false
+	for _, bs := range brSummary {
+		if bs.Date == today {
+			brFound = true
+			if bs.AvgHourlyRate < 2.0 {
+				t.Errorf("AvgHourlyRate: want >=2.0, got %f", bs.AvgHourlyRate)
+			}
+			break
+		}
+	}
+	if !brFound {
+		t.Errorf("QueryBurnRateDailySummary did not return today's date %s", today)
+	}
+
+	// Verify burn rate snapshots for today.
+	brSnapshots := store2.QueryBurnRateSnapshotsForDate(today)
+	if len(brSnapshots) == 0 {
+		t.Fatal("QueryBurnRateSnapshotsForDate returned no rows after reopen")
+	}
+	snap := brSnapshots[0]
+	if snap.TotalCost != 12.50 {
+		t.Errorf("snapshot TotalCost: want 12.50, got %f", snap.TotalCost)
+	}
+	if snap.Trend != int(burnrate.TrendUp) {
+		t.Errorf("snapshot Trend: want %d (TrendUp), got %d", int(burnrate.TrendUp), snap.Trend)
+	}
+	if snap.PerModel == "" {
+		t.Error("snapshot PerModel JSON is empty")
+	}
+
+	// Verify alert history.
+	alertRows := store2.QueryAlertHistory(7, "")
+	if len(alertRows) == 0 {
+		t.Fatal("QueryAlertHistory returned no rows after reopen")
+	}
+	alertFound := false
+	for _, a := range alertRows {
+		if a.Rule == "CostSurge" && a.SessionID == "sess-test-1" {
+			alertFound = true
+			if a.Severity != "critical" {
+				t.Errorf("alert Severity: want critical, got %s", a.Severity)
+			}
+			if a.Message != "Cost exceeded $10/hr" {
+				t.Errorf("alert Message: want 'Cost exceeded $10/hr', got %q", a.Message)
+			}
+			break
+		}
+	}
+	if !alertFound {
+		t.Error("QueryAlertHistory did not return the CostSurge alert")
+	}
+
+	// Verify alert history filter works.
+	filteredAlerts := store2.QueryAlertHistory(7, "CostSurge")
+	if len(filteredAlerts) != 1 {
+		t.Errorf("filtered alert count: want 1, got %d", len(filteredAlerts))
+	}
+	noMatch := store2.QueryAlertHistory(7, "NonExistentRule")
+	if len(noMatch) != 0 {
+		t.Errorf("non-matching filter: want 0, got %d", len(noMatch))
+	}
+
+	// Verify distinct alert rules.
+	rules := store2.QueryDistinctAlertRules()
+	if len(rules) == 0 {
+		t.Error("QueryDistinctAlertRules returned no rules")
+	}
+
+	// Verify session recovery.
+	sess := store2.GetSession("sess-test-1")
+	if sess == nil {
+		t.Fatal("session sess-test-1 not recovered after reopen")
+	}
+	if sess.PID != 99999 {
+		t.Errorf("recovered PID: want 99999, got %d", sess.PID)
+	}
 }

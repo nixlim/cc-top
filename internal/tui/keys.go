@@ -22,6 +22,7 @@ type KeyMap struct {
 	Deny        key.Binding
 	FocusAlerts key.Binding
 	FocusEvents key.Binding
+	Backspace   key.Binding
 }
 
 // DefaultKeyMap returns the default key bindings for cc-top.
@@ -94,6 +95,10 @@ func DefaultKeyMap() KeyMap {
 		FocusEvents: key.NewBinding(
 			key.WithKeys("e"),
 			key.WithHelp("e", "focus events"),
+		),
+		Backspace: key.NewBinding(
+			key.WithKeys("backspace"),
+			key.WithHelp("backspace", "back"),
 		),
 	}
 }

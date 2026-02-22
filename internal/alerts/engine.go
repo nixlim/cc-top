@@ -20,6 +20,7 @@ type Engine struct {
 	store      state.Store
 	rules      []Rule
 	notifier   Notifier
+	persister  AlertPersister
 	interval   time.Duration
 	dedupTTL   time.Duration
 
@@ -53,6 +54,13 @@ func WithInterval(d time.Duration) EngineOption {
 func WithDedupTTL(d time.Duration) EngineOption {
 	return func(e *Engine) {
 		e.dedupTTL = d
+	}
+}
+
+// WithPersister sets the alert persister for durable storage.
+func WithPersister(p AlertPersister) EngineOption {
+	return func(e *Engine) {
+		e.persister = p
 	}
 }
 
@@ -136,9 +144,12 @@ func (e *Engine) evaluate(now time.Time) {
 		e.alerts = append(e.alerts, newAlerts...)
 		e.mu.Unlock()
 
-		if e.notifier != nil {
-			for _, alert := range newAlerts {
+		for _, alert := range newAlerts {
+			if e.notifier != nil {
 				e.notifier.Notify(alert)
+			}
+			if e.persister != nil {
+				e.persister.PersistAlert(alert)
 			}
 		}
 	}

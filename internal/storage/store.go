@@ -8,7 +8,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/nixlim/cc-top/internal/alerts"
+	"github.com/nixlim/cc-top/internal/burnrate"
 	"github.com/nixlim/cc-top/internal/state"
+	"github.com/nixlim/cc-top/internal/stats"
 )
 
 const (
@@ -42,6 +45,9 @@ type writeOp struct {
 	counterKey string
 	counterVal float64
 	snapshot   *sessionSnapshot
+	dailyStats *dailyStatsRow
+	burnRate   *burnRateSnapshotRow
+	alert      *alertHistoryRow
 }
 
 type SQLiteStore struct {
@@ -53,6 +59,12 @@ type SQLiteStore struct {
 	closed          atomic.Bool
 	cancelMaint     context.CancelFunc
 	maintenanceDone chan struct{}
+
+	statsSnapshotFn func() stats.DashboardStats
+	burnSnapshotFn  func() burnrate.BurnRate
+	burnRateTicker  *time.Ticker
+	burnRateDone    chan struct{}
+	burnRateStop    chan struct{}
 }
 
 func NewSQLiteStore(dbPath string, retentionDays, summaryRetentionDays int) (*SQLiteStore, error) {
@@ -185,6 +197,44 @@ func (s *SQLiteStore) MarkExited(pid int) {
 	})
 }
 
+// SetStatsSnapshotFunc sets the callback used to capture a stats snapshot
+// during hourly maintenance and at shutdown.
+func (s *SQLiteStore) SetStatsSnapshotFunc(fn func() stats.DashboardStats) {
+	s.statsSnapshotFn = fn
+}
+
+// SetBurnRateSnapshotFunc sets the callback used to capture a burn rate
+// snapshot every 5 minutes and at shutdown.
+func (s *SQLiteStore) SetBurnRateSnapshotFunc(fn func() burnrate.BurnRate) {
+	s.burnSnapshotFn = fn
+}
+
+// StartBurnRateSnapshots starts a 5-minute ticker that captures burn rate
+// snapshots. If the burn rate callback is nil, this method returns immediately.
+func (s *SQLiteStore) StartBurnRateSnapshots() {
+	if s.burnSnapshotFn == nil {
+		return
+	}
+
+	s.burnRateTicker = time.NewTicker(5 * time.Minute)
+	s.burnRateDone = make(chan struct{})
+	stopCh := make(chan struct{})
+	s.burnRateStop = stopCh
+
+	go func() {
+		defer close(s.burnRateDone)
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-s.burnRateTicker.C:
+				br := s.burnSnapshotFn()
+				s.WriteBurnRateSnapshot(br)
+			}
+		}
+	}()
+}
+
 func (s *SQLiteStore) sendWrite(op writeOp) {
 	if s.closed.Load() {
 		return
@@ -198,13 +248,62 @@ func (s *SQLiteStore) sendWrite(op writeOp) {
 	}
 }
 
+// sendFinalWrite sends a write op without checking the closed flag,
+// using a blocking send with a 1s timeout. Used during shutdown to
+// persist final snapshots before the channel is closed.
+func (s *SQLiteStore) sendFinalWrite(op writeOp) {
+	defer func() { _ = recover() }()
+	select {
+	case s.writeChan <- op:
+	case <-time.After(1 * time.Second):
+		s.droppedWrites.Add(1)
+		log.Printf("WARNING: sendFinalWrite timed out after 1s (type=%s)", op.opType)
+	}
+}
+
 func (s *SQLiteStore) DroppedWrites() int64 {
 	return s.droppedWrites.Load()
 }
 
 func (s *SQLiteStore) Close() error {
+	// Step 1: Stop burn rate ticker (5s timeout).
+	if s.burnRateTicker != nil {
+		s.burnRateTicker.Stop()
+		close(s.burnRateStop)
+		select {
+		case <-s.burnRateDone:
+		case <-time.After(5 * time.Second):
+			log.Printf("WARNING: burn rate ticker goroutine did not stop within 5s")
+		}
+	}
+
+	// Step 2: Final burn rate snapshot via sendFinalWrite.
+	if s.burnSnapshotFn != nil {
+		br := s.burnSnapshotFn()
+		row := &burnRateSnapshotRow{
+			Timestamp:         time.Now().UTC().Format(time.RFC3339),
+			TotalCost:         br.TotalCost,
+			HourlyRate:        br.HourlyRate,
+			Trend:             int(br.Trend),
+			TokenVelocity:     br.TokenVelocity,
+			DailyProjection:   br.DailyProjection,
+			MonthlyProjection: br.MonthlyProjection,
+			PerModel:          br.PerModel,
+		}
+		s.sendFinalWrite(writeOp{opType: "burnRateSnapshot", burnRate: row})
+	}
+
+	// Step 3: Final stats snapshot via sendFinalWrite.
+	if s.statsSnapshotFn != nil {
+		ds := s.statsSnapshotFn()
+		today := time.Now().Format("2006-01-02")
+		s.sendFinalWrite(writeOp{opType: "dailyStats", dailyStats: buildDailyStatsRow(today, ds)})
+	}
+
+	// Step 4: Mark closed.
 	s.closed.Store(true)
 
+	// Step 5: Cancel maintenance (30s timeout).
 	s.cancelMaint()
 	select {
 	case <-s.maintenanceDone:
@@ -212,17 +311,22 @@ func (s *SQLiteStore) Close() error {
 		log.Printf("WARNING: maintenance goroutine did not stop within 30s")
 	}
 
+	// Step 6: Close write channel.
 	close(s.writeChan)
+
+	// Step 7: Drain writer (10s timeout).
 	select {
 	case <-s.doneChan:
 	case <-time.After(10 * time.Second):
 		log.Printf("ERROR: failed to drain writes within 10s, data may be lost")
 	}
 
+	// Step 8: Daily aggregation.
 	if err := s.runDailyAggregation(); err != nil {
 		log.Printf("ERROR: failed to run final aggregation: %v", err)
 	}
 
+	// Step 9: Close database.
 	return s.db.Close()
 }
 
@@ -280,6 +384,155 @@ func (s *SQLiteStore) flushBatch(batch []writeOp) {
 	}
 }
 
+// buildDailyStatsRow converts a DashboardStats into a dailyStatsRow.
+// Latency values are converted from seconds to milliseconds.
+func buildDailyStatsRow(date string, ds stats.DashboardStats) *dailyStatsRow {
+	type toolStat struct {
+		ToolName      string  `json:"tool_name"`
+		Count         int     `json:"count"`
+		AvgDurationMS float64 `json:"avg_duration_ms"`
+		P95DurationMS float64 `json:"p95_duration_ms"`
+	}
+	perfMap := make(map[string]stats.ToolPerf)
+	for _, tp := range ds.ToolPerformance {
+		perfMap[tp.ToolName] = tp
+	}
+	var mergedTools []toolStat
+	for _, tu := range ds.TopTools {
+		ts := toolStat{ToolName: tu.ToolName, Count: tu.Count}
+		if perf, ok := perfMap[tu.ToolName]; ok {
+			ts.AvgDurationMS = perf.AvgDurationMS
+			ts.P95DurationMS = perf.P95DurationMS
+		}
+		mergedTools = append(mergedTools, ts)
+	}
+
+	type errorCat struct {
+		Category string `json:"category"`
+		Count    int    `json:"count"`
+	}
+	var errCats []errorCat
+	for cat, count := range ds.ErrorCategories {
+		errCats = append(errCats, errorCat{Category: cat, Count: count})
+	}
+
+	type langStat struct {
+		Language string `json:"language"`
+		Count    int    `json:"count"`
+	}
+	var langBreakdown []langStat
+	for lang, count := range ds.LanguageBreakdown {
+		langBreakdown = append(langBreakdown, langStat{Language: lang, Count: count})
+	}
+
+	type decisionSrc struct {
+		Source string `json:"source"`
+		Count  int    `json:"count"`
+	}
+	var decSources []decisionSrc
+	for src, count := range ds.DecisionSources {
+		decSources = append(decSources, decisionSrc{Source: src, Count: count})
+	}
+
+	type mcpUsage struct {
+		ServerTool string `json:"server_tool"`
+		Count      int    `json:"count"`
+	}
+	var mcpTools []mcpUsage
+	for st, count := range ds.MCPToolUsage {
+		mcpTools = append(mcpTools, mcpUsage{ServerTool: st, Count: count})
+	}
+
+	var tokenInput, tokenOutput, tokenCacheRead, tokenCacheWrite int64
+	if ds.TokenBreakdown != nil {
+		tokenInput = ds.TokenBreakdown["input"]
+		tokenOutput = ds.TokenBreakdown["output"]
+		tokenCacheRead = ds.TokenBreakdown["cacheRead"]
+		tokenCacheWrite = ds.TokenBreakdown["cacheCreation"]
+	}
+
+	type modelCost struct {
+		Model       string  `json:"model"`
+		TotalCost   float64 `json:"total_cost"`
+		TotalTokens int64   `json:"total_tokens"`
+	}
+	var modelBreakdown []modelCost
+	for _, ms := range ds.ModelBreakdown {
+		modelBreakdown = append(modelBreakdown, modelCost{
+			Model:       ms.Model,
+			TotalCost:   ms.TotalCost,
+			TotalTokens: ms.TotalTokens,
+		})
+	}
+
+	var totalCost float64
+	for _, mc := range modelBreakdown {
+		totalCost += mc.TotalCost
+	}
+
+	return &dailyStatsRow{
+		Date:              date,
+		TotalCost:         totalCost,
+		TokenInput:        tokenInput,
+		TokenOutput:       tokenOutput,
+		TokenCacheRead:    tokenCacheRead,
+		TokenCacheWrite:   tokenCacheWrite,
+		LinesAdded:        ds.LinesAdded,
+		LinesRemoved:      ds.LinesRemoved,
+		Commits:           ds.Commits,
+		PRsOpened:         ds.PRs,
+		CacheEfficiency:   ds.CacheEfficiency,
+		CacheSavingsUSD:   ds.CacheSavingsUSD,
+		ErrorRate:         ds.ErrorRate,
+		RetryRate:         ds.RetryRate,
+		AvgAPILatencyMs:   ds.AvgAPILatency * 1000,
+		LatencyP50Ms:      ds.LatencyPercentiles.P50 * 1000,
+		LatencyP95Ms:      ds.LatencyPercentiles.P95 * 1000,
+		LatencyP99Ms:      ds.LatencyPercentiles.P99 * 1000,
+		ModelBreakdown:    modelBreakdown,
+		TopTools:          mergedTools,
+		ErrorCategories:   errCats,
+		LanguageBreakdown: langBreakdown,
+		DecisionSources:   decSources,
+		MCPToolUsage:      mcpTools,
+	}
+}
+
+// WriteDailyStats converts a DashboardStats into a dailyStatsRow and sends it
+// as a writeOp via the normal sendWrite path.
+func (s *SQLiteStore) WriteDailyStats(date string, ds stats.DashboardStats) {
+	s.sendWrite(writeOp{opType: "dailyStats", dailyStats: buildDailyStatsRow(date, ds)})
+}
+
+// WriteBurnRateSnapshot converts a BurnRate into a burnRateSnapshotRow and sends it.
+func (s *SQLiteStore) WriteBurnRateSnapshot(br burnrate.BurnRate) {
+	row := &burnRateSnapshotRow{
+		Timestamp:         time.Now().UTC().Format(time.RFC3339),
+		TotalCost:         br.TotalCost,
+		HourlyRate:        br.HourlyRate,
+		Trend:             int(br.Trend),
+		TokenVelocity:     br.TokenVelocity,
+		DailyProjection:   br.DailyProjection,
+		MonthlyProjection: br.MonthlyProjection,
+		PerModel:          br.PerModel,
+	}
+
+	s.sendWrite(writeOp{opType: "burnRateSnapshot", burnRate: row})
+}
+
+// PersistAlert implements the alerts.AlertPersister interface.
+func (s *SQLiteStore) PersistAlert(alert alerts.Alert) {
+	row := &alertHistoryRow{
+		Rule:      alert.Rule,
+		Severity:  alert.Severity,
+		Message:   alert.Message,
+		SessionID: alert.SessionID,
+		FiredAt:   alert.FiredAt.UTC().Format(time.RFC3339),
+	}
+
+	s.sendWrite(writeOp{opType: "alertHistory", alert: row})
+}
+
 func (s *SQLiteStore) executeOp(tx *sql.Tx, op writeOp) error {
 	switch op.opType {
 	case "metric":
@@ -296,6 +549,12 @@ func (s *SQLiteStore) executeOp(tx *sql.Tx, op writeOp) error {
 		return s.writeCounterState(tx, op.sessionID, op.counterKey, op.counterVal)
 	case "snapshot":
 		return s.writeSessionSnapshot(tx, op.sessionID, op.snapshot)
+	case "dailyStats":
+		return s.writeDailyStats(tx, op.dailyStats)
+	case "burnRateSnapshot":
+		return s.writeBurnRateSnapshot(tx, op.burnRate)
+	case "alertHistory":
+		return s.writeAlertHistory(tx, op.alert)
 	default:
 		return fmt.Errorf("unknown op type: %s", op.opType)
 	}

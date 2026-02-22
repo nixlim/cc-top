@@ -16,6 +16,82 @@ import (
 	"github.com/nixlim/cc-top/internal/stats"
 )
 
+// DailyStatsRow holds a single day's statistics for the history Overview and Performance sub-tabs.
+// Fields populated from daily_stats have their full values; fields from daily_summaries fallback
+// have IsLegacy=true and performance fields are zero-valued (displayed as "--").
+type DailyStatsRow struct {
+	Date             string
+	TotalCost        float64
+	TokenInput       int64
+	TokenOutput      int64
+	TokenCacheRead   int64
+	TokenCacheWrite  int64
+	SessionCount     int
+	APIRequests      int
+	APIErrors        int
+	LinesAdded       int
+	LinesRemoved     int
+	Commits          int
+	PRsOpened        int
+	CacheEfficiency  float64
+	CacheSavingsUSD  float64
+	ErrorRate        float64
+	RetryRate        float64
+	AvgAPILatency    float64 // seconds
+	LatencyP50       float64 // seconds
+	LatencyP95       float64 // seconds
+	LatencyP99       float64 // seconds
+	ModelBreakdown   []stats.ModelStats
+	TopTools         []stats.ToolUsage
+	ToolPerformance  []stats.ToolPerf
+	ErrorCategories  map[string]int
+	LanguageBreakdown map[string]int
+	DecisionSources  map[string]int
+	MCPToolUsage     map[string]int
+	IsLegacy         bool // true when sourced from daily_summaries (pre-v2)
+}
+
+// BurnRateDailySummary holds aggregated burn rate data for a single day.
+type BurnRateDailySummary struct {
+	Date              string
+	AvgHourlyRate     float64
+	PeakHourlyRate    float64
+	AvgTokenVelocity  float64
+	DailyProjection   float64
+	MonthlyProjection float64
+	SnapshotCount     int
+}
+
+// BurnRateSnapshotRow holds a single point-in-time burn rate snapshot.
+type BurnRateSnapshotRow struct {
+	Timestamp        time.Time
+	TotalCost        float64
+	HourlyRate       float64
+	Trend            burnrate.TrendDirection
+	TokenVelocity    float64
+	DailyProjection  float64
+	MonthlyProjection float64
+	PerModel         []burnrate.ModelBurnRate
+}
+
+// AlertHistoryRow holds a single persisted alert record.
+type AlertHistoryRow struct {
+	Rule      string
+	Severity  string
+	Message   string
+	SessionID string
+	FiredAt   time.Time
+}
+
+// HistoryProvider supplies historical data for the redesigned History tab.
+// SQLiteStore implements this interface. Nil is accepted without panic.
+type HistoryProvider interface {
+	QueryDailyStats(days int) []DailyStatsRow
+	QueryBurnRateDailySummary(days int) []BurnRateDailySummary
+	QueryBurnRateSnapshots(date string) []BurnRateSnapshotRow
+	QueryAlertHistory(days int, ruleFilter string) []AlertHistoryRow
+}
+
 type ViewState int
 
 const (
@@ -90,6 +166,7 @@ type Model struct {
 	stats    StatsProvider
 	scanner  ScannerProvider
 	settings SettingsWriter
+	history  HistoryProvider
 
 	selectedSession string
 	sessionCursor   int
@@ -121,8 +198,12 @@ type Model struct {
 
 	isPersistent bool
 
+	historySection     int // 0=Overview, 1=Performance, 2=Burn Rate, 3=Alerts
+	historyCursor      int
 	historyGranularity string
 	historyScrollPos   int
+	historyAlertFilter string          // "" = all, or specific rule name
+	historyFilterMenu  FilterMenuState // filter menu for Alerts sub-tab
 
 	refreshRate time.Duration
 
@@ -188,6 +269,10 @@ func WithOnShutdown(fn func()) ModelOption {
 
 func WithPersistenceFlag(isPersistent bool) ModelOption {
 	return func(m *Model) { m.isPersistent = isPersistent }
+}
+
+func WithHistoryProvider(h HistoryProvider) ModelOption {
+	return func(m *Model) { m.history = h }
 }
 
 func (m Model) Init() tea.Cmd {
@@ -454,7 +539,7 @@ func (m Model) handleAlertsPanelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleDetailOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
-	case key.Matches(msg, m.keys.Escape), key.Matches(msg, m.keys.Enter):
+	case key.Matches(msg, m.keys.Escape), key.Matches(msg, m.keys.Enter), key.Matches(msg, m.keys.Backspace):
 		m.detailOverlay = false
 		m.detailContent = ""
 		m.detailTitle = ""
@@ -527,33 +612,74 @@ func (m Model) handleStatsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleHistoryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Handle history alert filter menu when active.
+	if m.historyFilterMenu.Active {
+		return m.handleHistoryFilterMenuKey(msg)
+	}
+
 	switch {
 	case key.Matches(msg, m.keys.Tab):
 		m.view = ViewDashboard
 		return m, nil
 	case key.Matches(msg, m.keys.Up):
-		if m.historyScrollPos > 0 {
-			m.historyScrollPos--
+		if m.historyCursor > 0 {
+			m.historyCursor--
 		}
 		return m, nil
 	case key.Matches(msg, m.keys.Down):
-		m.historyScrollPos++
+		m.historyCursor++
 		return m, nil
+	case key.Matches(msg, m.keys.Enter):
+		return m.openHistoryDetail()
 	}
 
 	if msg.Type == tea.KeyRunes && len(msg.Runes) == 1 {
 		switch msg.Runes[0] {
-		case 'd':
-			m.historyGranularity = "daily"
+		case '1':
+			m.historySection = 0
+			m.historyCursor = 0
 			m.historyScrollPos = 0
+			return m, nil
+		case '2':
+			m.historySection = 1
+			m.historyCursor = 0
+			m.historyScrollPos = 0
+			return m, nil
+		case '3':
+			m.historySection = 2
+			m.historyCursor = 0
+			m.historyScrollPos = 0
+			return m, nil
+		case '4':
+			m.historySection = 3
+			m.historyCursor = 0
+			m.historyScrollPos = 0
+			return m, nil
+		case 'd':
+			if m.historySection != 3 {
+				m.historyGranularity = "daily"
+				m.historyCursor = 0
+				m.historyScrollPos = 0
+			}
 			return m, nil
 		case 'w':
-			m.historyGranularity = "weekly"
-			m.historyScrollPos = 0
+			if m.historySection != 3 {
+				m.historyGranularity = "weekly"
+				m.historyCursor = 0
+				m.historyScrollPos = 0
+			}
 			return m, nil
 		case 'm':
-			m.historyGranularity = "monthly"
-			m.historyScrollPos = 0
+			if m.historySection != 3 {
+				m.historyGranularity = "monthly"
+				m.historyCursor = 0
+				m.historyScrollPos = 0
+			}
+			return m, nil
+		case '/':
+			if m.historySection == 3 {
+				m.openHistoryAlertFilterMenu()
+			}
 			return m, nil
 		}
 	}

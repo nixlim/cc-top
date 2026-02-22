@@ -839,6 +839,102 @@ func TestAlertHighRejection_CustomThreshold(t *testing.T) {
 	}
 }
 
+// testPersister records all persisted alerts for test assertions.
+type testPersister struct {
+	mu     sync.Mutex
+	alerts []Alert
+}
+
+func (p *testPersister) PersistAlert(alert Alert) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.alerts = append(p.alerts, alert)
+}
+
+func (p *testPersister) count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.alerts)
+}
+
+func TestAlertEngine_CallsPersister(t *testing.T) {
+	store := state.NewMemoryStore()
+	cfg := defaultTestConfig()
+	calc := newTestCalculator()
+	persister := &testPersister{}
+
+	engine := NewEngine(store, cfg, calc,
+		WithPersister(persister),
+		WithDedupTTL(100*time.Millisecond),
+	)
+
+	now := time.Now()
+
+	// Trigger an error storm to fire alerts.
+	for i := 0; i < 15; i++ {
+		store.AddEvent("sess-persist", state.Event{
+			Name: "claude_code.api_error",
+			Attributes: map[string]string{
+				"error": "overloaded",
+			},
+			Timestamp: now.Add(-time.Duration(30-i) * time.Second),
+		})
+	}
+
+	engine.EvaluateAt(now)
+
+	if persister.count() == 0 {
+		t.Fatal("expected persister to receive alerts")
+	}
+
+	// Verify alert fields
+	persister.mu.Lock()
+	alert := persister.alerts[0]
+	persister.mu.Unlock()
+
+	if alert.Rule == "" {
+		t.Error("persisted alert should have a rule name")
+	}
+	if alert.Severity == "" {
+		t.Error("persisted alert should have a severity")
+	}
+	if alert.Message == "" {
+		t.Error("persisted alert should have a message")
+	}
+}
+
+func TestAlertEngine_NilPersister(t *testing.T) {
+	store := state.NewMemoryStore()
+	cfg := defaultTestConfig()
+	calc := newTestCalculator()
+
+	// No persister configured
+	engine := NewEngine(store, cfg, calc,
+		WithDedupTTL(100*time.Millisecond),
+	)
+
+	now := time.Now()
+
+	// Trigger an error storm.
+	for i := 0; i < 15; i++ {
+		store.AddEvent("sess-nil-persist", state.Event{
+			Name: "claude_code.api_error",
+			Attributes: map[string]string{
+				"error": "overloaded",
+			},
+			Timestamp: now.Add(-time.Duration(30-i) * time.Second),
+		})
+	}
+
+	// Should not panic with nil persister
+	engine.EvaluateAt(now)
+
+	alerts := engine.Alerts()
+	if len(alerts) == 0 {
+		t.Fatal("expected alerts to fire even without persister")
+	}
+}
+
 func TestAlertHighRejection_WindowRespected(t *testing.T) {
 	store := state.NewMemoryStore()
 	cfg := defaultTestConfig()
